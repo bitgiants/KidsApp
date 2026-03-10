@@ -132,16 +132,20 @@
       /* Kill any inline preview <video> YouTube injects on hover.
          ytd-video-preview is a SINGLETON under ytd-app (not inside any
          card) that YouTube repositions over whichever thumbnail is
-         hovered.  We hide it by default and let JS add .ytkg-preview-ok
-         when the hovered video is approved. */
+         hovered.  We hide the video player INSIDE it (not the element
+         itself, which YouTube depends on for layout). JS adds
+         .ytkg-preview-ok when the hovered video is approved. */
       ytd-thumbnail:not(.ytkg-approved) video,
       yt-thumbnail-view-model:not(.ytkg-approved) video {
         display: none !important;
       }
 
-      /* Global preview player — hidden by default, shown only for
-         approved videos via the .ytkg-preview-ok class added by JS. */
-      ytd-video-preview:not(.ytkg-preview-ok) {
+      /* Global preview player — block the actual video/player inside
+         ytd-video-preview, but leave the container itself intact so
+         YouTube's layout and lifecycle management still works. */
+      ytd-video-preview:not(.ytkg-preview-ok) video.video-stream,
+      ytd-video-preview:not(.ytkg-preview-ok) .html5-video-player,
+      ytd-video-preview:not(.ytkg-preview-ok) #player-container-wrapper {
         display: none !important;
       }
 
