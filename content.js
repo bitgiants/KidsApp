@@ -105,17 +105,32 @@
         opacity: 0.85;
       }
 
-      /* ── Thumbnail badge & hover-block overlay ── */
-      .ytkg-thumb-wrap {
-        position: relative;
+      /* ── Thumbnail: CSS-first hover/preview blocking ── */
+      /* All ytd-thumbnail elements are shielded by default via a
+         CSS ::after pseudo-element.  Only thumbnails that earn the
+         .ytkg-approved class have the shield removed.  This survives
+         YouTube's SPA DOM rebuilds because the rule is global CSS,
+         not an injected DOM node. */
+
+      ytd-thumbnail {
+        position: relative !important;
       }
 
-      .ytkg-thumb-shield {
+      /* Transparent shield — blocks hover & click on unapproved thumbs */
+      ytd-thumbnail:not(.ytkg-approved)::after {
+        content: '';
         position: absolute;
         inset: 0;
         z-index: 999;
         pointer-events: auto;
         background: transparent;
+        cursor: default;
+      }
+
+      /* Kill any inline preview <video> YouTube injects on hover */
+      ytd-thumbnail:not(.ytkg-approved) video,
+      ytd-thumbnail:not(.ytkg-approved) ytd-video-preview {
+        display: none !important;
       }
 
       .ytkg-thumb-badge {
@@ -479,55 +494,20 @@
     return [];
   }
 
-  /**
-   * Check if a <video> element lives inside a thumbnail card (inline
-   * hover preview) rather than in the main player.
-   */
-  function isInlineThumbnailVideo(videoEl) {
-    return !!videoEl.closest(THUMB_CARD_SELECTORS);
-  }
-
-  /**
-   * Handle an inline preview <video> that YouTube injects into a
-   * thumbnail on hover.  If the video hasn't been approved, immediately
-   * pause and hide it so the user never sees unapproved content.
-   */
-  function handleInlinePreviewVideo(videoEl) {
-    const card = videoEl.closest(THUMB_CARD_SELECTORS);
-    if (!card) return;
-    const videoId = getVideoIdFromCard(card);
-    if (!videoId) return;
-
-    const cached = thumbChecked.get(videoId);
-    if (cached && cached.state === "allowed") {
-      // This video passed — let the preview play.
-      return;
-    }
-
-    // Not yet approved (pending or blocked or unknown) — kill the preview.
-    videoEl.pause();
-    videoEl.removeAttribute("src");
-    videoEl.load(); // reset to stop buffering
-    videoEl.style.display = "none";
-    log("Inline preview killed for", videoId, "— state:", cached?.state || "unknown");
-  }
-
   // The main MutationObserver: watches the entire document for added nodes.
+  // Inline thumbnail preview videos are now blocked by CSS (display:none
+  // on ytd-thumbnail:not(.ytkg-approved) video), so we only need to handle
+  // the main player <video> here.
   const domObserver = new MutationObserver((mutations) => {
     for (const mutation of mutations) {
-      // Check every node that was added to the DOM.
       for (const node of mutation.addedNodes) {
-        // Only examine element nodes (nodeType 1).
         if (node.nodeType !== Node.ELEMENT_NODE) continue;
 
         const videos = findVideosInTree(node);
         for (const videoEl of videos) {
-          // Distinguish inline thumbnail previews from the main player.
-          if (isInlineThumbnailVideo(videoEl)) {
-            handleInlinePreviewVideo(videoEl);
-          } else {
-            onVideoFound(videoEl);
-          }
+          // Skip videos inside thumbnail cards — CSS handles those.
+          if (videoEl.closest(THUMB_CARD_SELECTORS)) continue;
+          onVideoFound(videoEl);
         }
       }
     }
@@ -643,39 +623,37 @@
   }
 
   /**
-   * Get or create the wrapper element around a card's thumbnail that
-   * we use as a positioning context for badges and the hover shield.
+   * Find the ytd-thumbnail element inside a card.
    */
-  function ensureThumbWrap(card) {
-    const existing = card.querySelector(".ytkg-thumb-wrap");
-    if (existing) return existing;
-
-    // Find the actual thumbnail container.
-    const thumbContainer =
-      card.querySelector("ytd-thumbnail") ||
-      card.querySelector("#thumbnail");
-    if (!thumbContainer) return null;
-
-    // Ensure it is a positioning context.
-    const pos = getComputedStyle(thumbContainer).position;
-    if (pos === "static") {
-      thumbContainer.style.position = "relative";
-    }
-    thumbContainer.classList.add("ytkg-thumb-wrap");
-    return thumbContainer;
+  function getThumbElement(card) {
+    return card.querySelector("ytd-thumbnail") ||
+           card.querySelector("#thumbnail");
   }
 
   /**
-   * Apply the visual state (badge + optional shield/overlay) to a
-   * thumbnail card based on its evaluation status.
+   * Apply the visual state (badge + optional overlay) to a thumbnail
+   * card based on its evaluation status.
+   *
+   * The hover/preview blocking is handled by CSS: all ytd-thumbnail
+   * elements without the .ytkg-approved class have a ::after shield
+   * and hidden <video> elements.  This method manages the class and
+   * the visual badge/overlay DOM.
    */
   function applyThumbState(card, videoId, state, reason) {
-    const wrap = ensureThumbWrap(card);
-    if (!wrap) return;
+    const thumb = getThumbElement(card);
+    if (!thumb) return;
 
-    // Remove any existing badge / shield / overlay from previous states.
-    wrap.querySelectorAll(
-      ".ytkg-thumb-badge, .ytkg-thumb-shield, .ytkg-thumb-blocked-overlay"
+    // Manage the .ytkg-approved class — this is the only thing that
+    // controls whether hover preview is allowed (via CSS).
+    if (state === "allowed") {
+      thumb.classList.add("ytkg-approved");
+    } else {
+      thumb.classList.remove("ytkg-approved");
+    }
+
+    // Remove any existing badge / overlay from previous states.
+    thumb.querySelectorAll(
+      ".ytkg-thumb-badge, .ytkg-thumb-blocked-overlay"
     ).forEach((el) => el.remove());
 
     // Badge
@@ -684,11 +662,6 @@
 
     if (state === "pending") {
       badge.classList.add("ytkg-thumb-badge--pending");
-      // Hover shield — blocks the inline preview from starting.
-      const shield = document.createElement("div");
-      shield.className = "ytkg-thumb-shield";
-      shield.title = "Checking if this video is kid-friendly…";
-      wrap.appendChild(shield);
     } else if (state === "allowed") {
       badge.classList.add("ytkg-thumb-badge--allowed");
       badge.textContent = "\u2713"; // ✓
@@ -699,19 +672,10 @@
       const blockedOverlay = document.createElement("div");
       blockedOverlay.className = "ytkg-thumb-blocked-overlay";
       blockedOverlay.innerHTML = `<span>${escapeHtml(reason || "Blocked")}</span>`;
-      wrap.appendChild(blockedOverlay);
-      // Shield stays to prevent hover preview and clicks.
-      const shield = document.createElement("div");
-      shield.className = "ytkg-thumb-shield";
-      shield.title = reason || "This video is blocked.";
-      shield.addEventListener("click", (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-      });
-      wrap.appendChild(shield);
+      thumb.appendChild(blockedOverlay);
     }
 
-    wrap.appendChild(badge);
+    thumb.appendChild(badge);
   }
 
   /**
