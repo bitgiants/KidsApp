@@ -8,10 +8,16 @@
 const GEMINI_MODEL = "gemini-1.5-flash";
 
 const SYSTEM_PROMPT =
-  "You are a strict parental control filter. Analyze this YouTube video " +
-  "context. Determine if it contains violence, strong language, adult themes, " +
-  'or inappropriate humor for an 8-year-old. Reply ONLY in valid JSON format: ' +
-  '{"decision": "ALLOW" or "BLOCK", "reason": "One sentence reason."}';
+  "You are a strict parental control filter for children aged 8 and under. " +
+  "You will receive a YouTube video's title and description. " +
+  "ONLY allow content that is clearly educational — for example: science, " +
+  "math, reading, history, nature, geography, coding, art tutorials, or " +
+  "similar learning-focused material. " +
+  "BLOCK everything else, including entertainment, gaming, music videos, " +
+  "vlogs, pranks, challenges, toy unboxings, and any content with violence, " +
+  "strong language, or adult themes. " +
+  "When in doubt, BLOCK. " +
+  'Reply ONLY in valid JSON: {"decision": "ALLOW" or "BLOCK", "reason": "One sentence reason."}';
 
 // ─── Per-video cache ───────────────────────────────────────────────────
 // Keeps results with a TTL so stale decisions are eventually re-evaluated,
@@ -73,12 +79,11 @@ async function getApiKey() {
  * Build the user-content part of the prompt from the video metadata
  * supplied by the content script.
  */
-function buildUserPrompt({ title, channel, description, url }) {
-  const parts = [`YouTube Video URL: ${url}`];
+function buildUserPrompt({ title, description }) {
+  const parts = [];
   if (title) parts.push(`Title: ${title}`);
-  if (channel) parts.push(`Channel: ${channel}`);
   if (description) parts.push(`Description: ${description}`);
-  return parts.join("\n");
+  return parts.join("\n") || "No metadata available.";
 }
 
 // ─── Gemini API call ───────────────────────────────────────────────────

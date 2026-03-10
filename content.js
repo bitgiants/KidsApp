@@ -267,8 +267,30 @@
    * Immediately pause the <video>, show the analyzing overlay, collect
    * metadata, and ask the background script to evaluate the video via Gemini.
    */
+  /**
+   * Returns true if the current page is a YouTube Shorts URL.
+   * Shorts URLs contain "/shorts/" in the path.
+   */
+  function isYouTubeShorts() {
+    return window.location.pathname.startsWith("/shorts/");
+  }
+
   function handleVideoChange(videoEl) {
     const videoId = getVideoId();
+
+    // ── Block YouTube Shorts entirely ──────────────────────────────────
+    // Shorts are short-form videos that bypass normal watch metadata and
+    // are not suitable for the curated educational experience we want.
+    if (isYouTubeShorts()) {
+      const shortsKey = "shorts:" + window.location.pathname;
+      if (shortsKey === lastCheckedVideoId) return;
+      lastCheckedVideoId = shortsKey;
+
+      videoEl.pause();
+      showAnalyzingOverlay(videoEl);
+      showBlockedOverlay("YouTube Shorts are not allowed.");
+      return;
+    }
 
     // Avoid re-checking the same video (e.g. duplicate mutation events).
     // Use the ?v= video ID when available; fall back to the element src.
