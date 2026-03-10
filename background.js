@@ -199,8 +199,6 @@ async function evaluateVideo(payload) {
 }
 
 // ─── Message listener ──────────────────────────────────────────────────
-
-// ─── Message listener ──────────────────────────────────────────────────
 // Only register when running inside a Chrome extension context.
 
 if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
