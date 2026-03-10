@@ -131,8 +131,16 @@
 
       /* Kill any inline preview <video> YouTube injects on hover */
       ytd-thumbnail:not(.ytkg-approved) video,
-      ytd-thumbnail:not(.ytkg-approved) ytd-video-preview,
       yt-thumbnail-view-model:not(.ytkg-approved) video {
+        display: none !important;
+      }
+
+      /* Block the floating hover-preview player.
+         ytd-video-preview lives outside ytd-thumbnail — it's a top-level
+         element under div#video-preview that YouTube positions over the
+         hovered card.  Toggling hidden → active/playing on hover.
+         Hide it entirely so unapproved content can't auto-play on hover. */
+      ytd-video-preview {
         display: none !important;
       }
 
@@ -613,6 +621,8 @@
         for (const videoEl of videos) {
           // Skip videos inside thumbnail cards — CSS handles those.
           if (videoEl.closest(THUMB_CARD_SELECTORS)) continue;
+          // Skip videos inside the floating hover-preview player.
+          if (videoEl.closest("ytd-video-preview")) continue;
           onVideoFound(videoEl);
         }
       }
