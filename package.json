@@ -4,7 +4,9 @@
   "description": "Chrome extension that checks YouTube videos for child safety using the Gemini API.",
   "main": "background.js",
   "scripts": {
-    "test": "jest --verbose"
+    "setup": "npm install && node scripts/validate-setup.js",
+    "test": "jest --verbose",
+    "package": "node scripts/package.js"
   },
   "keywords": ["chrome-extension", "youtube", "parental-controls", "kids-safety"],
   "author": "",
