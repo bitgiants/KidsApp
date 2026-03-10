@@ -11,34 +11,36 @@ const {
 // ─── buildUserPrompt ─────────────────────────────────────────────────
 
 describe("buildUserPrompt", () => {
-  test("includes all provided fields", () => {
+  test("includes title and description", () => {
     const result = buildUserPrompt({
-      url: "https://youtube.com/watch?v=abc",
-      title: "Cool Video",
-      channel: "KidsChannel",
-      description: "A fun video",
+      title: "Learn Fractions",
+      description: "A math tutorial for kids",
     });
-    expect(result).toContain("YouTube Video URL: https://youtube.com/watch?v=abc");
-    expect(result).toContain("Title: Cool Video");
-    expect(result).toContain("Channel: KidsChannel");
-    expect(result).toContain("Description: A fun video");
+    expect(result).toContain("Title: Learn Fractions");
+    expect(result).toContain("Description: A math tutorial for kids");
   });
 
-  test("omits empty fields", () => {
+  test("omits empty fields and returns fallback", () => {
     const result = buildUserPrompt({
-      url: "https://youtube.com/watch?v=abc",
       title: "",
-      channel: "",
       description: "",
     });
-    expect(result).toBe("YouTube Video URL: https://youtube.com/watch?v=abc");
+    expect(result).toBe("No metadata available.");
   });
 
-  test("omits undefined fields", () => {
-    const result = buildUserPrompt({
-      url: "https://youtube.com/watch?v=abc",
-    });
-    expect(result).toBe("YouTube Video URL: https://youtube.com/watch?v=abc");
+  test("returns fallback when no fields provided", () => {
+    const result = buildUserPrompt({});
+    expect(result).toBe("No metadata available.");
+  });
+
+  test("works with title only", () => {
+    const result = buildUserPrompt({ title: "Science Experiment" });
+    expect(result).toBe("Title: Science Experiment");
+  });
+
+  test("works with description only", () => {
+    const result = buildUserPrompt({ description: "How volcanoes work" });
+    expect(result).toBe("Description: How volcanoes work");
   });
 });
 

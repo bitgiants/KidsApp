@@ -1,30 +1,106 @@
 // background.js — Manifest V3 service worker.
-// Listens for CHECK_VIDEO messages from content.js, queries the Google Gemini
-// API (gemini-1.5-flash) with a parental-control system prompt, and returns
-// the parsed { blocked, reason } decision to the content script.
+// Routes CHECK_VIDEO messages from content.js to the user's chosen AI
+// provider (Gemini, OpenAI, Anthropic, or OpenRouter) and returns the
+// parsed { blocked, reason } decision to the content script.
+// Also checks channel whitelist/blacklist and blocked categories
+// BEFORE making any AI call.
 
-// ─── Configuration ─────────────────────────────────────────────────────
+// ─── Logging ─────────────────────────────────────────────────────────
+const LOG_PREFIX = "[YT Kids Guard]";
+function log(...args) { console.log(LOG_PREFIX, ...args); }
+function warn(...args) { console.warn(LOG_PREFIX, ...args); }
+function error(...args) { console.error(LOG_PREFIX, ...args); }
 
-const GEMINI_MODEL = "gemini-1.5-flash";
+// ─── Category definitions ────────────────────────────────────────────
+// Parents can toggle these on/off in the options page.
+// Each category has an ID, label, and keywords the AI should watch for.
 
-const SYSTEM_PROMPT =
-  "You are a strict parental control filter. Analyze this YouTube video " +
-  "context. Determine if it contains violence, strong language, adult themes, " +
-  'or inappropriate humor for an 8-year-old. Reply ONLY in valid JSON format: ' +
-  '{"decision": "ALLOW" or "BLOCK", "reason": "One sentence reason."}';
+const CATEGORIES = [
+  { id: "pranks",       label: "Pranks & Challenges",          on: true },
+  { id: "reactions",    label: "Reaction & Unboxing Videos",   on: true },
+  { id: "gaming",       label: "Gaming (non-educational)",     on: true },
+  { id: "vlogs",        label: "Vlogs & Daily Life",           on: true },
+  { id: "memes",        label: "Memes & Internet Lore",        on: true },
+  { id: "asmr",         label: "ASMR & Mukbang",               on: true },
+  { id: "music",        label: "Music Videos & Lyrics",        on: false },
+  { id: "news",         label: "News & Politics",              on: true },
+  { id: "horror",       label: "Horror & Creepy Content",      on: true },
+  { id: "drama",        label: "Drama & Gossip",               on: true },
+  { id: "toy_unboxing", label: "Toy Unboxing & Consumerism",   on: true },
+  { id: "shorts",       label: "YouTube Shorts",               on: true },
+];
 
-// ─── Per-video cache ───────────────────────────────────────────────────
-// Keeps results with a TTL so stale decisions are eventually re-evaluated,
-// and a max-size cap to prevent unbounded memory growth.
+// ─── System prompt builder ───────────────────────────────────────────
 
-const CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+function buildSystemPrompt(blockedCategories) {
+  const categoryList = blockedCategories
+    .map((c) => `* ${c.label}`)
+    .join("\n");
+
+  return (
+    "You are a thoughtful content curator for children aged 8–14. " +
+    "Your goal is to filter out 'brainrot' — mindless, overstimulating, or harmful content — " +
+    "while ALLOWING genuinely educational and enriching material, even on technical topics.\n\n" +
+    "REJECT (BLOCK) any content in these categories:\n" +
+    categoryList + "\n" +
+    "* Any content with violence, strong language, adult themes, or sexual content.\n" +
+    "* Hyper-stimulating, loud, or over-exaggerated content designed to addict.\n" +
+    "* Nonsensical or repetitive content with no educational value.\n\n" +
+    "ACCEPT (ALLOW):\n" +
+    "* Science, history, nature, geography, or space documentaries and explainers.\n" +
+    "* Technology, programming, computer science, and IT tutorials or explainers.\n" +
+    "* Math, engineering, robotics, electronics, and maker content.\n" +
+    "* DIY, building, crafting, or art tutorials.\n" +
+    "* Calm, narrative-driven storytelling and book discussions.\n" +
+    "* Structured, educational explanations of how things work.\n" +
+    "* Age-appropriate entertainment that is calm, creative, or enriching.\n" +
+    "* Language learning and educational content in any language.\n\n" +
+    "IMPORTANT: Technical and computer-related educational content (hardware reviews " +
+    "for learning, coding tutorials, tech explainers, science experiments) should be " +
+    "ALLOWED even if the topic seems advanced. Children aged 8–14 benefit from exposure " +
+    "to STEM subjects. Only block tech content if it is purely consumerist hype with " +
+    "no learning value.\n\n" +
+    "Analyze the provided video title, description, and channel name. " +
+    "Does it meet the ACCEPT criteria?\n" +
+    'Reply ONLY in this exact JSON format: {"decision": "ALLOW" or "BLOCK", "reason": "One sentence reason."}'
+  );
+}
+
+// ─── Provider registry ───────────────────────────────────────────────
+
+const PROVIDERS = {
+  gemini: {
+    label: "Google Gemini",
+    defaultModel: "gemini-2.0-flash",
+    storageKey: "geminiApiKey",
+    query: queryGemini,
+  },
+  openai: {
+    label: "OpenAI",
+    defaultModel: "gpt-4o-mini",
+    storageKey: "openaiApiKey",
+    query: queryOpenAICompatible("https://api.openai.com/v1/chat/completions"),
+  },
+  anthropic: {
+    label: "Anthropic",
+    defaultModel: "claude-haiku-4-5-20251001",
+    storageKey: "anthropicApiKey",
+    query: queryAnthropic,
+  },
+  openrouter: {
+    label: "OpenRouter",
+    defaultModel: "google/gemini-2.0-flash-001",
+    storageKey: "openrouterApiKey",
+    query: queryOpenAICompatible("https://openrouter.ai/api/v1/chat/completions"),
+  },
+};
+
+// ─── Per-video cache ─────────────────────────────────────────────────
+
+const CACHE_TTL_MS = 30 * 60 * 1000;
 const CACHE_MAX_SIZE = 200;
-
 const cache = new Map();
 
-/**
- * Retrieve a cached result if it exists and has not expired.
- */
 function cacheGet(key) {
   const entry = cache.get(key);
   if (!entry) return undefined;
@@ -35,12 +111,7 @@ function cacheGet(key) {
   return entry.value;
 }
 
-/**
- * Store a result in the cache.  If the cache exceeds its size limit the
- * oldest entry is evicted (FIFO via Map insertion order).
- */
 function cacheSet(key, value) {
-  // Evict oldest entries when at capacity.
   while (cache.size >= CACHE_MAX_SIZE) {
     const oldestKey = cache.keys().next().value;
     cache.delete(oldestKey);
@@ -48,69 +119,122 @@ function cacheSet(key, value) {
   cache.set(key, { value, timestamp: Date.now() });
 }
 
-// ─── API key ───────────────────────────────────────────────────────────
+// ─── Settings helpers ────────────────────────────────────────────────
 
-/**
- * Retrieve the Gemini API key stored in chrome.storage.local.
- *
- * Set it once from the extension's service-worker DevTools console:
- *   chrome.storage.local.set({ geminiApiKey: "YOUR_KEY" });
- */
-async function getApiKey() {
-  const { geminiApiKey } = await chrome.storage.local.get("geminiApiKey");
-  if (!geminiApiKey) {
+async function getSettings() {
+  const data = await chrome.storage.local.get([
+    "aiProvider",
+    "aiModel",
+    "geminiApiKey",
+    "openaiApiKey",
+    "anthropicApiKey",
+    "openrouterApiKey",
+    "blockedCategories",
+    "whitelist",
+    "blacklist",
+  ]);
+  const provider = data.aiProvider || "gemini";
+  const providerDef = PROVIDERS[provider];
+  if (!providerDef) throw new Error(`Unknown provider: ${provider}`);
+
+  const apiKey = data[providerDef.storageKey];
+  if (!apiKey) {
     throw new Error(
-      "Gemini API key not configured. " +
-      'Run: chrome.storage.local.set({ geminiApiKey: "YOUR_KEY" })'
+      `No API key configured for ${providerDef.label}. ` +
+      "Open the extension options to set one."
     );
   }
-  return geminiApiKey;
+
+  const model = data.aiModel || providerDef.defaultModel;
+
+  // Blocked categories: merge defaults with user overrides.
+  let blockedCategories;
+  if (data.blockedCategories) {
+    blockedCategories = CATEGORIES.filter(
+      (c) => data.blockedCategories.includes(c.id)
+    );
+  } else {
+    blockedCategories = CATEGORIES.filter((c) => c.on);
+  }
+
+  const whitelist = data.whitelist || [];
+  const blacklist = data.blacklist || [];
+
+  return { provider, providerDef, apiKey, model, blockedCategories, whitelist, blacklist };
 }
 
-// ─── Prompt construction ───────────────────────────────────────────────
+// ─── List matching helpers ───────────────────────────────────────────
 
-/**
- * Build the user-content part of the prompt from the video metadata
- * supplied by the content script.
- */
-function buildUserPrompt({ title, channel, description, url }) {
-  const parts = [`YouTube Video URL: ${url}`];
+function normalizeChannel(name) {
+  return (name || "").toLowerCase().replace(/^@/, "").trim();
+}
+
+function isChannelInList(channel, list) {
+  const norm = normalizeChannel(channel);
+  if (!norm) return false;
+  return list.some((entry) => {
+    const entryNorm = normalizeChannel(entry.channel || entry);
+    return entryNorm === norm;
+  });
+}
+
+function isVideoInList(videoId, list) {
+  if (!videoId) return false;
+  return list.some((entry) => entry.videoId === videoId);
+}
+
+// ─── Prompt construction ─────────────────────────────────────────────
+
+function buildUserPrompt({ title, description, channel }) {
+  const parts = [];
   if (title) parts.push(`Title: ${title}`);
   if (channel) parts.push(`Channel: ${channel}`);
   if (description) parts.push(`Description: ${description}`);
-  return parts.join("\n");
+  return parts.join("\n") || "No metadata available.";
 }
 
-// ─── Gemini API call ───────────────────────────────────────────────────
+// ─── Response parsing (shared) ───────────────────────────────────────
 
-/**
- * Send the system prompt + user content to the Gemini REST API and return
- * the model's text response parsed as JSON.
- *
- * Uses the systemInstruction field so the model treats SYSTEM_PROMPT as a
- * system-level instruction, separate from the user turn.
- */
-async function queryGemini(apiKey, userPrompt) {
+function parseAIResponse(rawText) {
+  const cleaned = rawText
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+
+  let parsed;
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch (err) {
+    throw new Error(
+      `Failed to parse AI JSON — raw response: "${rawText}"`
+    );
+  }
+
+  const decision = String(parsed.decision ?? "").toUpperCase();
+  const reason = String(parsed.reason ?? "No reason provided.");
+
+  if (decision !== "ALLOW" && decision !== "BLOCK") {
+    throw new Error(
+      `Unexpected decision value "${parsed.decision}" — raw: "${rawText}"`
+    );
+  }
+
+  return { decision, reason };
+}
+
+// ─── Provider: Google Gemini ─────────────────────────────────────────
+
+async function queryGemini(apiKey, model, userPrompt, systemPrompt) {
   const endpoint =
     `https://generativelanguage.googleapis.com/v1beta/models/` +
-    `${GEMINI_MODEL}:generateContent?key=${apiKey}`;
+    `${model}:generateContent?key=${apiKey}`;
+
+  log(`[Gemini/${model}] Sending prompt`);
 
   const body = {
-    // System-level instruction — the parental-control persona.
-    systemInstruction: {
-      parts: [{ text: SYSTEM_PROMPT }],
-    },
-    // User turn — the video metadata to evaluate.
-    contents: [
-      {
-        role: "user",
-        parts: [{ text: userPrompt }],
-      },
-    ],
-    generationConfig: {
-      temperature: 0.1,
-      maxOutputTokens: 256,
-    },
+    systemInstruction: { parts: [{ text: systemPrompt }] },
+    contents: [{ role: "user", parts: [{ text: userPrompt }] }],
+    generationConfig: { temperature: 0.1, maxOutputTokens: 256 },
   };
 
   const response = await fetch(endpoint, {
@@ -126,69 +250,126 @@ async function queryGemini(apiKey, userPrompt) {
 
   const data = await response.json();
   const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!rawText) throw new Error("Gemini returned an empty response.");
 
-  if (!rawText) {
-    throw new Error("Gemini returned an empty response.");
-  }
-
-  return parseGeminiResponse(rawText);
+  log(`[Gemini/${model}] Response:`, rawText);
+  return parseAIResponse(rawText);
 }
 
-// ─── Response parsing ──────────────────────────────────────────────────
+// ─── Provider: OpenAI-compatible (OpenAI + OpenRouter) ───────────────
 
-/**
- * Parse the raw text returned by Gemini into a { decision, reason } object.
- *
- * The model is instructed to reply with bare JSON, but it occasionally wraps
- * the payload in markdown fences — we strip those before parsing.
- */
-function parseGeminiResponse(rawText) {
-  // Strip optional markdown code fences: ```json ... ``` or ``` ... ```
-  const cleaned = rawText
-    .replace(/^```(?:json)?\s*/i, "")
-    .replace(/\s*```$/i, "")
-    .trim();
+function queryOpenAICompatible(endpoint) {
+  return async function (apiKey, model, userPrompt, systemPrompt) {
+    log(`[${endpoint}/${model}] Sending prompt`);
 
-  let parsed;
-  try {
-    parsed = JSON.parse(cleaned);
-  } catch (err) {
-    throw new Error(
-      `Failed to parse Gemini JSON — raw response: "${rawText}"`
-    );
-  }
+    const body = {
+      model,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ],
+      temperature: 0.1,
+      max_tokens: 256,
+    };
 
-  // Normalise the decision field to upper-case for reliable comparison.
-  const decision = String(parsed.decision ?? "").toUpperCase();
-  const reason = String(parsed.reason ?? "No reason provided.");
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(body),
+    });
 
-  if (decision !== "ALLOW" && decision !== "BLOCK") {
-    throw new Error(
-      `Unexpected decision value "${parsed.decision}" — raw: "${rawText}"`
-    );
-  }
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`API ${response.status}: ${errorText}`);
+    }
 
-  return { decision, reason };
+    const data = await response.json();
+    const rawText = data?.choices?.[0]?.message?.content;
+    if (!rawText) throw new Error("API returned an empty response.");
+
+    log(`[${model}] Response:`, rawText);
+    return parseAIResponse(rawText);
+  };
 }
 
-// ─── Main evaluation logic ─────────────────────────────────────────────
+// ─── Provider: Anthropic ─────────────────────────────────────────────
 
-/**
- * Evaluate a video and return { blocked: bool, reason: string } to the
- * content script.  Results are cached by videoId.
- */
+async function queryAnthropic(apiKey, model, userPrompt, systemPrompt) {
+  log(`[Anthropic/${model}] Sending prompt`);
+
+  const body = {
+    model,
+    max_tokens: 256,
+    system: systemPrompt,
+    messages: [{ role: "user", content: userPrompt }],
+    temperature: 0.1,
+  };
+
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true",
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Anthropic API ${response.status}: ${errorText}`);
+  }
+
+  const data = await response.json();
+  const rawText = data?.content?.[0]?.text;
+  if (!rawText) throw new Error("Anthropic returned an empty response.");
+
+  log(`[Anthropic/${model}] Response:`, rawText);
+  return parseAIResponse(rawText);
+}
+
+// ─── Main evaluation logic ───────────────────────────────────────────
+
 async function evaluateVideo(payload) {
-  const { videoId } = payload;
+  const { videoId, channel } = payload;
 
-  // Return the cached result if we already checked this video.
   const cached = cacheGet(videoId);
-  if (cached) return cached;
+  if (cached) {
+    log("Cache hit for", videoId, "->", cached.blocked ? "BLOCK" : "ALLOW");
+    return cached;
+  }
 
-  const apiKey = await getApiKey();
+  const settings = await getSettings();
+
+  // 1. Whitelist check — skip AI entirely.
+  if (isChannelInList(channel, settings.whitelist) ||
+      isVideoInList(videoId, settings.whitelist)) {
+    log("WHITELIST match for", channel || videoId);
+    const result = { blocked: false, reason: "Whitelisted channel." };
+    cacheSet(videoId, result);
+    return result;
+  }
+
+  // 2. Blacklist check — skip AI entirely.
+  if (isChannelInList(channel, settings.blacklist) ||
+      isVideoInList(videoId, settings.blacklist)) {
+    log("BLACKLIST match for", channel || videoId);
+    const result = { blocked: true, reason: "Blacklisted channel." };
+    cacheSet(videoId, result);
+    return result;
+  }
+
+  // 3. AI evaluation with dynamic system prompt.
+  const systemPrompt = buildSystemPrompt(settings.blockedCategories);
   const userPrompt = buildUserPrompt(payload);
-  const { decision, reason } = await queryGemini(apiKey, userPrompt);
+  const { decision, reason } = await settings.providerDef.query(
+    settings.apiKey, settings.model, userPrompt, systemPrompt
+  );
 
-  // Map the Gemini decision to the boolean flag content.js expects.
   const result = {
     blocked: decision === "BLOCK",
     reason,
@@ -198,44 +379,81 @@ async function evaluateVideo(payload) {
   return result;
 }
 
-// ─── Message listener ──────────────────────────────────────────────────
-// Only register when running inside a Chrome extension context.
+// ─── PIN verification for settings access ────────────────────────────
+
+async function verifyPin(pin) {
+  const { parentPin } = await chrome.storage.local.get("parentPin");
+  if (!parentPin) return true; // No PIN set yet — allow.
+  return parentPin === pin;
+}
+
+// ─── Message listener ────────────────────────────────────────────────
 
 if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-    // Only handle CHECK_VIDEO messages from the content script.
-    if (message.type !== "CHECK_VIDEO") return false;
-
-    evaluateVideo(message.payload)
-      .then((result) => {
-        console.log("[YT Kids Guard]", result.blocked ? "BLOCK" : "ALLOW",
-          "—", result.reason);
-        sendResponse(result);
-      })
-      .catch((err) => {
-        console.error("[YT Kids Guard] evaluation failed:", err);
-        // Fail closed — block the video when the safety check cannot
-        // complete.  For a kids' app it is safer to over-block than to
-        // accidentally allow inappropriate content.
-        sendResponse({
-          blocked: true,
-          reason: "Safety check unavailable — video blocked as a precaution.",
+    if (message.type === "CHECK_VIDEO") {
+      log("CHECK_VIDEO received for:", message.payload.videoId);
+      evaluateVideo(message.payload)
+        .then((result) => {
+          log(result.blocked ? "BLOCK" : "ALLOW", "—", result.reason);
+          sendResponse(result);
+        })
+        .catch((err) => {
+          error("Evaluation failed:", err.message, err.stack);
+          sendResponse({
+            blocked: true,
+            reason: "Safety check unavailable — video blocked as a precaution.",
+          });
         });
-      });
+      return true;
+    }
 
-    // Return true so Chrome keeps the message channel open for our async
-    // sendResponse call above.
-    return true;
+    if (message.type === "CHECK_CHANNEL") {
+      const { channel } = message;
+      log("CHECK_CHANNEL received for:", channel);
+      getSettings()
+        .then((settings) => {
+          if (isChannelInList(channel, settings.whitelist)) {
+            sendResponse({ blocked: false, reason: "Whitelisted channel." });
+          } else if (isChannelInList(channel, settings.blacklist)) {
+            sendResponse({ blocked: true, reason: "Blacklisted channel." });
+          } else {
+            sendResponse({ blocked: false, reason: "Channel not in any list." });
+          }
+        })
+        .catch((err) => {
+          error("CHECK_CHANNEL failed:", err.message);
+          sendResponse({ blocked: false, reason: "" });
+        });
+      return true;
+    }
+
+    if (message.type === "VERIFY_PIN") {
+      verifyPin(message.pin).then((ok) => sendResponse({ ok }));
+      return true;
+    }
+
+    if (message.type === "GET_CATEGORIES") {
+      sendResponse({ categories: CATEGORIES });
+      return false;
+    }
+
+    return false;
   });
 }
 
-// ─── Exports for testing ──────────────────────────────────────────────
-// In the extension context `module` is undefined; in Node/Jest it exists.
+// ─── Exports for testing ─────────────────────────────────────────────
 
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
+    PROVIDERS,
+    CATEGORIES,
     buildUserPrompt,
-    parseGeminiResponse,
+    buildSystemPrompt,
+    parseAIResponse,
+    normalizeChannel,
+    isChannelInList,
+    isVideoInList,
     cacheGet,
     cacheSet,
     cache,
