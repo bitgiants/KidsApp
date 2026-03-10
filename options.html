@@ -19,7 +19,7 @@
       border-radius: 12px;
       box-shadow: 0 1px 3px rgba(0,0,0,0.12);
       padding: 2rem;
-      max-width: 480px;
+      max-width: 520px;
       width: 100%;
       height: fit-content;
     }
@@ -33,13 +33,24 @@
       color: #757575;
       margin-bottom: 1.5rem;
     }
+    .version {
+      font-size: 0.75rem;
+      color: #9e9e9e;
+      float: right;
+      margin-top: 0.15rem;
+    }
     label {
       display: block;
       font-size: 0.9rem;
       font-weight: 500;
       margin-bottom: 0.4rem;
     }
-    input[type="password"] {
+    .hint {
+      font-size: 0.78rem;
+      color: #9e9e9e;
+      margin-bottom: 0.5rem;
+    }
+    select, input[type="text"], input[type="password"] {
       width: 100%;
       padding: 0.6rem 0.75rem;
       font-size: 0.9rem;
@@ -47,9 +58,55 @@
       border-radius: 6px;
       outline: none;
       transition: border-color 0.2s;
+      background: #fff;
     }
-    input[type="password"]:focus {
+    select:focus, input:focus {
       border-color: #2e7d32;
+    }
+    .field-group {
+      margin-bottom: 1.25rem;
+    }
+    .provider-card {
+      background: #fafafa;
+      border: 1px solid #e0e0e0;
+      border-radius: 8px;
+      padding: 1rem;
+      margin-bottom: 1.25rem;
+    }
+    .provider-card.active {
+      border-color: #2e7d32;
+      background: #f1f8e9;
+    }
+    .provider-header {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-bottom: 0.75rem;
+    }
+    .provider-header .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #bdbdbd;
+    }
+    .provider-card.active .dot {
+      background: #2e7d32;
+    }
+    .provider-header span {
+      font-weight: 500;
+      font-size: 0.9rem;
+    }
+    .provider-badge {
+      font-size: 0.7rem;
+      padding: 0.15rem 0.5rem;
+      border-radius: 4px;
+      background: #e0e0e0;
+      color: #616161;
+      margin-left: auto;
+    }
+    .provider-card.active .provider-badge {
+      background: #2e7d32;
+      color: #fff;
     }
     .btn-row {
       display: flex;
@@ -86,15 +143,78 @@
 </head>
 <body>
   <div class="card">
+    <span class="version">v2.0</span>
     <h1>YouTube Kids Guard</h1>
-    <p class="subtitle">Configure your Gemini API key for video safety checks.</p>
+    <p class="subtitle">Choose your AI provider and enter your API key.</p>
 
-    <label for="apiKey">Gemini API Key</label>
-    <input type="password" id="apiKey" placeholder="Enter your API key" autocomplete="off">
+    <!-- Provider selector -->
+    <div class="field-group">
+      <label for="providerSelect">AI Provider</label>
+      <select id="providerSelect">
+        <option value="gemini">Google Gemini</option>
+        <option value="openai">OpenAI</option>
+        <option value="anthropic">Anthropic (Claude)</option>
+        <option value="openrouter">OpenRouter</option>
+      </select>
+    </div>
+
+    <!-- Provider cards (only the active one is highlighted) -->
+    <div id="providerCards">
+      <div class="provider-card" data-provider="gemini">
+        <div class="provider-header">
+          <div class="dot"></div>
+          <span>Google Gemini</span>
+          <span class="provider-badge">Free tier</span>
+        </div>
+        <label for="geminiKey">API Key</label>
+        <input type="password" id="geminiKey" placeholder="Enter Gemini API key" autocomplete="off">
+        <p class="hint">Default model: gemini-2.0-flash</p>
+      </div>
+
+      <div class="provider-card" data-provider="openai">
+        <div class="provider-header">
+          <div class="dot"></div>
+          <span>OpenAI</span>
+          <span class="provider-badge">Paid</span>
+        </div>
+        <label for="openaiKey">API Key</label>
+        <input type="password" id="openaiKey" placeholder="sk-..." autocomplete="off">
+        <p class="hint">Default model: gpt-4o-mini</p>
+      </div>
+
+      <div class="provider-card" data-provider="anthropic">
+        <div class="provider-header">
+          <div class="dot"></div>
+          <span>Anthropic (Claude)</span>
+          <span class="provider-badge">Paid</span>
+        </div>
+        <label for="anthropicKey">API Key</label>
+        <input type="password" id="anthropicKey" placeholder="sk-ant-..." autocomplete="off">
+        <p class="hint">Default model: claude-haiku-4-5-20251001</p>
+      </div>
+
+      <div class="provider-card" data-provider="openrouter">
+        <div class="provider-header">
+          <div class="dot"></div>
+          <span>OpenRouter</span>
+          <span class="provider-badge">Multi-model</span>
+        </div>
+        <label for="openrouterKey">API Key</label>
+        <input type="password" id="openrouterKey" placeholder="sk-or-..." autocomplete="off">
+        <p class="hint">Default model: google/gemini-2.0-flash-001</p>
+      </div>
+    </div>
+
+    <!-- Optional model override -->
+    <div class="field-group">
+      <label for="modelOverride">Model Override (optional)</label>
+      <input type="text" id="modelOverride" placeholder="Leave blank for default">
+      <p class="hint">Override the default model for the selected provider.</p>
+    </div>
 
     <div class="btn-row">
-      <button class="btn-save" id="saveBtn">Save</button>
-      <button class="btn-clear" id="clearBtn">Clear Key</button>
+      <button class="btn-save" id="saveBtn">Save Settings</button>
+      <button class="btn-clear" id="clearBtn">Clear All Keys</button>
     </div>
 
     <p class="status" id="status"></p>

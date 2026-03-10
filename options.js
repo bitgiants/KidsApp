@@ -1,49 +1,129 @@
-// options.js — Manages the Gemini API key via chrome.storage.local.
+// options.js — Multi-provider settings management.
 
-const apiKeyInput = document.getElementById("apiKey");
+const providerSelect = document.getElementById("providerSelect");
+const modelOverride = document.getElementById("modelOverride");
 const saveBtn = document.getElementById("saveBtn");
 const clearBtn = document.getElementById("clearBtn");
 const statusEl = document.getElementById("status");
+
+// Map provider IDs to their key input elements.
+const keyInputs = {
+  gemini: document.getElementById("geminiKey"),
+  openai: document.getElementById("openaiKey"),
+  anthropic: document.getElementById("anthropicKey"),
+  openrouter: document.getElementById("openrouterKey"),
+};
+
+// Map provider IDs to storage keys (must match background.js PROVIDERS).
+const storageKeys = {
+  gemini: "geminiApiKey",
+  openai: "openaiApiKey",
+  anthropic: "anthropicApiKey",
+  openrouter: "openrouterApiKey",
+};
 
 function showStatus(message, type = "info") {
   statusEl.textContent = message;
   statusEl.className = `status status--${type}`;
 }
 
-// ─── Load existing key on page open ──────────────────────────────────
+// ─── Visual: highlight the active provider card ──────────────────────
 
-chrome.storage.local.get("geminiApiKey", ({ geminiApiKey }) => {
-  if (geminiApiKey) {
-    // Show a masked placeholder so the user knows a key is stored.
-    apiKeyInput.placeholder = "••••••••••••••••";
-    showStatus("API key is configured.", "success");
-  } else {
-    showStatus("No API key configured yet.", "info");
+function updateProviderCards() {
+  const active = providerSelect.value;
+  document.querySelectorAll(".provider-card").forEach((card) => {
+    card.classList.toggle("active", card.dataset.provider === active);
+  });
+}
+
+providerSelect.addEventListener("change", updateProviderCards);
+
+// ─── Load saved settings ─────────────────────────────────────────────
+
+chrome.storage.local.get(
+  ["aiProvider", "aiModel", ...Object.values(storageKeys)],
+  (data) => {
+    // Restore provider selection.
+    if (data.aiProvider && providerSelect.querySelector(`option[value="${data.aiProvider}"]`)) {
+      providerSelect.value = data.aiProvider;
+    }
+
+    // Restore model override.
+    if (data.aiModel) {
+      modelOverride.value = data.aiModel;
+    }
+
+    // Show masked placeholders for stored keys.
+    for (const [provider, storageKey] of Object.entries(storageKeys)) {
+      if (data[storageKey]) {
+        keyInputs[provider].placeholder = "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022";
+      }
+    }
+
+    updateProviderCards();
+
+    const activeKey = data[storageKeys[providerSelect.value]];
+    if (activeKey) {
+      showStatus(`${providerSelect.value} is configured and active.`, "success");
+    } else {
+      showStatus("Enter an API key for your chosen provider.", "info");
+    }
   }
-});
+);
 
 // ─── Save ────────────────────────────────────────────────────────────
 
 saveBtn.addEventListener("click", () => {
-  const key = apiKeyInput.value.trim();
-  if (!key) {
-    showStatus("Please enter an API key.", "error");
-    return;
+  const provider = providerSelect.value;
+  const toSave = { aiProvider: provider };
+
+  // Save model override (or clear it).
+  const model = modelOverride.value.trim();
+  if (model) {
+    toSave.aiModel = model;
+  } else {
+    // Clear so background.js falls back to the provider default.
+    toSave.aiModel = "";
   }
 
-  chrome.storage.local.set({ geminiApiKey: key }, () => {
-    apiKeyInput.value = "";
-    apiKeyInput.placeholder = "••••••••••••••••";
-    showStatus("API key saved.", "success");
+  // Save any keys that the user typed (non-empty inputs).
+  let keysSaved = 0;
+  for (const [prov, storageKey] of Object.entries(storageKeys)) {
+    const val = keyInputs[prov].value.trim();
+    if (val) {
+      toSave[storageKey] = val;
+      keysSaved++;
+    }
+  }
+
+  chrome.storage.local.set(toSave, () => {
+    // Clear inputs and show masked placeholders.
+    for (const [prov, storageKey] of Object.entries(storageKeys)) {
+      if (toSave[storageKey]) {
+        keyInputs[prov].value = "";
+        keyInputs[prov].placeholder = "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022";
+      }
+    }
+    showStatus(
+      `Settings saved. Active provider: ${provider}` +
+        (keysSaved > 0 ? ` (${keysSaved} key${keysSaved > 1 ? "s" : ""} updated).` : "."),
+      "success"
+    );
   });
 });
 
-// ─── Clear ───────────────────────────────────────────────────────────
+// ─── Clear all ───────────────────────────────────────────────────────
 
 clearBtn.addEventListener("click", () => {
-  chrome.storage.local.remove("geminiApiKey", () => {
-    apiKeyInput.value = "";
-    apiKeyInput.placeholder = "Enter your API key";
-    showStatus("API key removed.", "info");
+  const allKeys = ["aiProvider", "aiModel", ...Object.values(storageKeys)];
+  chrome.storage.local.remove(allKeys, () => {
+    for (const input of Object.values(keyInputs)) {
+      input.value = "";
+      input.placeholder = input.dataset?.defaultPlaceholder || "Enter API key";
+    }
+    modelOverride.value = "";
+    providerSelect.value = "gemini";
+    updateProviderCards();
+    showStatus("All keys and settings cleared.", "info");
   });
 });

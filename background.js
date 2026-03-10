@@ -1,7 +1,7 @@
 // background.js — Manifest V3 service worker.
-// Listens for CHECK_VIDEO messages from content.js, queries the Google Gemini
-// API (gemini-2.0-flash) with a content-curation system prompt, and returns
-// the parsed { blocked, reason } decision to the content script.
+// Routes CHECK_VIDEO messages from content.js to the user's chosen AI
+// provider (Gemini, OpenAI, Anthropic, or OpenRouter) and returns the
+// parsed { blocked, reason } decision to the content script.
 
 // ─── Logging ─────────────────────────────────────────────────────────
 const LOG_PREFIX = "[YT Kids Guard]";
@@ -9,9 +9,7 @@ function log(...args) { console.log(LOG_PREFIX, ...args); }
 function warn(...args) { console.warn(LOG_PREFIX, ...args); }
 function error(...args) { console.error(LOG_PREFIX, ...args); }
 
-// ─── Configuration ─────────────────────────────────────────────────────
-
-const GEMINI_MODEL = "gemini-2.0-flash";
+// ─── System prompt (shared across all providers) ─────────────────────
 
 const SYSTEM_PROMPT =
   "You are a strict, high-standard content curator for an 8-year-old's media diet. " +
@@ -30,18 +28,43 @@ const SYSTEM_PROMPT =
   "Does it meet the ACCEPT criteria?\n" +
   'Reply ONLY in this exact JSON format: {"decision": "ALLOW" or "BLOCK", "reason": "One sentence reason."}';
 
-// ─── Per-video cache ───────────────────────────────────────────────────
-// Keeps results with a TTL so stale decisions are eventually re-evaluated,
-// and a max-size cap to prevent unbounded memory growth.
+// ─── Provider registry ───────────────────────────────────────────────
+// Each provider defines a default model and a query function that takes
+// (apiKey, model, userPrompt) and returns { decision, reason }.
+
+const PROVIDERS = {
+  gemini: {
+    label: "Google Gemini",
+    defaultModel: "gemini-2.0-flash",
+    storageKey: "geminiApiKey",
+    query: queryGemini,
+  },
+  openai: {
+    label: "OpenAI",
+    defaultModel: "gpt-4o-mini",
+    storageKey: "openaiApiKey",
+    query: queryOpenAICompatible("https://api.openai.com/v1/chat/completions"),
+  },
+  anthropic: {
+    label: "Anthropic",
+    defaultModel: "claude-haiku-4-5-20251001",
+    storageKey: "anthropicApiKey",
+    query: queryAnthropic,
+  },
+  openrouter: {
+    label: "OpenRouter",
+    defaultModel: "google/gemini-2.0-flash-001",
+    storageKey: "openrouterApiKey",
+    query: queryOpenAICompatible("https://openrouter.ai/api/v1/chat/completions"),
+  },
+};
+
+// ─── Per-video cache ─────────────────────────────────────────────────
 
 const CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
 const CACHE_MAX_SIZE = 200;
-
 const cache = new Map();
 
-/**
- * Retrieve a cached result if it exists and has not expired.
- */
 function cacheGet(key) {
   const entry = cache.get(key);
   if (!entry) return undefined;
@@ -52,12 +75,7 @@ function cacheGet(key) {
   return entry.value;
 }
 
-/**
- * Store a result in the cache.  If the cache exceeds its size limit the
- * oldest entry is evicted (FIFO via Map insertion order).
- */
 function cacheSet(key, value) {
-  // Evict oldest entries when at capacity.
   while (cache.size >= CACHE_MAX_SIZE) {
     const oldestKey = cache.keys().next().value;
     cache.delete(oldestKey);
@@ -65,31 +83,35 @@ function cacheSet(key, value) {
   cache.set(key, { value, timestamp: Date.now() });
 }
 
-// ─── API key ───────────────────────────────────────────────────────────
+// ─── Settings helpers ────────────────────────────────────────────────
 
-/**
- * Retrieve the Gemini API key stored in chrome.storage.local.
- *
- * Set it once from the extension's service-worker DevTools console:
- *   chrome.storage.local.set({ geminiApiKey: "YOUR_KEY" });
- */
-async function getApiKey() {
-  const { geminiApiKey } = await chrome.storage.local.get("geminiApiKey");
-  if (!geminiApiKey) {
+async function getSettings() {
+  const data = await chrome.storage.local.get([
+    "aiProvider",
+    "aiModel",
+    "geminiApiKey",
+    "openaiApiKey",
+    "anthropicApiKey",
+    "openrouterApiKey",
+  ]);
+  const provider = data.aiProvider || "gemini";
+  const providerDef = PROVIDERS[provider];
+  if (!providerDef) throw new Error(`Unknown provider: ${provider}`);
+
+  const apiKey = data[providerDef.storageKey];
+  if (!apiKey) {
     throw new Error(
-      "Gemini API key not configured. " +
-      'Run: chrome.storage.local.set({ geminiApiKey: "YOUR_KEY" })'
+      `No API key configured for ${providerDef.label}. ` +
+      "Open the extension options to set one."
     );
   }
-  return geminiApiKey;
+
+  const model = data.aiModel || providerDef.defaultModel;
+  return { provider, providerDef, apiKey, model };
 }
 
-// ─── Prompt construction ───────────────────────────────────────────────
+// ─── Prompt construction ─────────────────────────────────────────────
 
-/**
- * Build the user-content part of the prompt from the video metadata
- * supplied by the content script.
- */
 function buildUserPrompt({ title, description }) {
   const parts = [];
   if (title) parts.push(`Title: ${title}`);
@@ -97,80 +119,9 @@ function buildUserPrompt({ title, description }) {
   return parts.join("\n") || "No metadata available.";
 }
 
-// ─── Gemini API call ───────────────────────────────────────────────────
+// ─── Response parsing (shared) ───────────────────────────────────────
 
-/**
- * Send the system prompt + user content to the Gemini REST API and return
- * the model's text response parsed as JSON.
- *
- * Uses the systemInstruction field so the model treats SYSTEM_PROMPT as a
- * system-level instruction, separate from the user turn.
- */
-async function queryGemini(apiKey, userPrompt) {
-  const endpoint =
-    `https://generativelanguage.googleapis.com/v1beta/models/` +
-    `${GEMINI_MODEL}:generateContent?key=${apiKey}`;
-
-  log("Sending prompt to Gemini:\n" + userPrompt);
-
-  const body = {
-    // System-level instruction — the parental-control persona.
-    systemInstruction: {
-      parts: [{ text: SYSTEM_PROMPT }],
-    },
-    // User turn — the video metadata to evaluate.
-    contents: [
-      {
-        role: "user",
-        parts: [{ text: userPrompt }],
-      },
-    ],
-    generationConfig: {
-      temperature: 0.1,
-      maxOutputTokens: 256,
-    },
-  };
-
-  let response;
-  try {
-    response = await fetch(endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-  } catch (fetchErr) {
-    error("Network error calling Gemini:", fetchErr.message);
-    throw fetchErr;
-  }
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    error("Gemini API error:", response.status, errorText);
-    throw new Error(`Gemini API ${response.status}: ${errorText}`);
-  }
-
-  const data = await response.json();
-  const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-
-  if (!rawText) {
-    error("Gemini returned empty response. Full payload:", JSON.stringify(data));
-    throw new Error("Gemini returned an empty response.");
-  }
-
-  log("Gemini raw response:", rawText);
-  return parseGeminiResponse(rawText);
-}
-
-// ─── Response parsing ──────────────────────────────────────────────────
-
-/**
- * Parse the raw text returned by Gemini into a { decision, reason } object.
- *
- * The model is instructed to reply with bare JSON, but it occasionally wraps
- * the payload in markdown fences — we strip those before parsing.
- */
-function parseGeminiResponse(rawText) {
-  // Strip optional markdown code fences: ```json ... ``` or ``` ... ```
+function parseAIResponse(rawText) {
   const cleaned = rawText
     .replace(/^```(?:json)?\s*/i, "")
     .replace(/\s*```$/i, "")
@@ -181,11 +132,10 @@ function parseGeminiResponse(rawText) {
     parsed = JSON.parse(cleaned);
   } catch (err) {
     throw new Error(
-      `Failed to parse Gemini JSON — raw response: "${rawText}"`
+      `Failed to parse AI JSON — raw response: "${rawText}"`
     );
   }
 
-  // Normalise the decision field to upper-case for reliable comparison.
   const decision = String(parsed.decision ?? "").toUpperCase();
   const reason = String(parsed.reason ?? "No reason provided.");
 
@@ -198,27 +148,132 @@ function parseGeminiResponse(rawText) {
   return { decision, reason };
 }
 
-// ─── Main evaluation logic ─────────────────────────────────────────────
+// ─── Provider: Google Gemini ─────────────────────────────────────────
 
-/**
- * Evaluate a video and return { blocked: bool, reason: string } to the
- * content script.  Results are cached by videoId.
- */
+async function queryGemini(apiKey, model, userPrompt) {
+  const endpoint =
+    `https://generativelanguage.googleapis.com/v1beta/models/` +
+    `${model}:generateContent?key=${apiKey}`;
+
+  log(`[Gemini/${model}] Sending prompt`);
+
+  const body = {
+    systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+    contents: [{ role: "user", parts: [{ text: userPrompt }] }],
+    generationConfig: { temperature: 0.1, maxOutputTokens: 256 },
+  };
+
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Gemini API ${response.status}: ${errorText}`);
+  }
+
+  const data = await response.json();
+  const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!rawText) throw new Error("Gemini returned an empty response.");
+
+  log(`[Gemini/${model}] Response:`, rawText);
+  return parseAIResponse(rawText);
+}
+
+// ─── Provider: OpenAI-compatible (OpenAI + OpenRouter) ───────────────
+// Returns a query function bound to a specific endpoint URL.
+
+function queryOpenAICompatible(endpoint) {
+  return async function (apiKey, model, userPrompt) {
+    log(`[${endpoint}/${model}] Sending prompt`);
+
+    const body = {
+      model,
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content: userPrompt },
+      ],
+      temperature: 0.1,
+      max_tokens: 256,
+    };
+
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`API ${response.status}: ${errorText}`);
+    }
+
+    const data = await response.json();
+    const rawText = data?.choices?.[0]?.message?.content;
+    if (!rawText) throw new Error("API returned an empty response.");
+
+    log(`[${model}] Response:`, rawText);
+    return parseAIResponse(rawText);
+  };
+}
+
+// ─── Provider: Anthropic ─────────────────────────────────────────────
+
+async function queryAnthropic(apiKey, model, userPrompt) {
+  log(`[Anthropic/${model}] Sending prompt`);
+
+  const body = {
+    model,
+    max_tokens: 256,
+    system: SYSTEM_PROMPT,
+    messages: [{ role: "user", content: userPrompt }],
+    temperature: 0.1,
+  };
+
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true",
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Anthropic API ${response.status}: ${errorText}`);
+  }
+
+  const data = await response.json();
+  const rawText = data?.content?.[0]?.text;
+  if (!rawText) throw new Error("Anthropic returned an empty response.");
+
+  log(`[Anthropic/${model}] Response:`, rawText);
+  return parseAIResponse(rawText);
+}
+
+// ─── Main evaluation logic ───────────────────────────────────────────
+
 async function evaluateVideo(payload) {
   const { videoId } = payload;
 
-  // Return the cached result if we already checked this video.
   const cached = cacheGet(videoId);
   if (cached) {
     log("Cache hit for", videoId, "→", cached.blocked ? "BLOCK" : "ALLOW");
     return cached;
   }
 
-  const apiKey = await getApiKey();
+  const { providerDef, apiKey, model } = await getSettings();
   const userPrompt = buildUserPrompt(payload);
-  const { decision, reason } = await queryGemini(apiKey, userPrompt);
+  const { decision, reason } = await providerDef.query(apiKey, model, userPrompt);
 
-  // Map the Gemini decision to the boolean flag content.js expects.
   const result = {
     blocked: decision === "BLOCK",
     reason,
@@ -228,12 +283,10 @@ async function evaluateVideo(payload) {
   return result;
 }
 
-// ─── Message listener ──────────────────────────────────────────────────
-// Only register when running inside a Chrome extension context.
+// ─── Message listener ────────────────────────────────────────────────
 
 if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-    // Only handle CHECK_VIDEO messages from the content script.
     if (message.type !== "CHECK_VIDEO") return false;
 
     log("CHECK_VIDEO received for:", message.payload.videoId);
@@ -244,28 +297,23 @@ if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
       })
       .catch((err) => {
         error("Evaluation failed:", err.message, err.stack);
-        // Fail closed — block the video when the safety check cannot
-        // complete.  For a kids' app it is safer to over-block than to
-        // accidentally allow inappropriate content.
         sendResponse({
           blocked: true,
           reason: "Safety check unavailable — video blocked as a precaution.",
         });
       });
 
-    // Return true so Chrome keeps the message channel open for our async
-    // sendResponse call above.
     return true;
   });
 }
 
-// ─── Exports for testing ──────────────────────────────────────────────
-// In the extension context `module` is undefined; in Node/Jest it exists.
+// ─── Exports for testing ─────────────────────────────────────────────
 
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
+    PROVIDERS,
     buildUserPrompt,
-    parseGeminiResponse,
+    parseAIResponse,
     cacheGet,
     cacheSet,
     cache,
