@@ -479,6 +479,39 @@
     return [];
   }
 
+  /**
+   * Check if a <video> element lives inside a thumbnail card (inline
+   * hover preview) rather than in the main player.
+   */
+  function isInlineThumbnailVideo(videoEl) {
+    return !!videoEl.closest(THUMB_CARD_SELECTORS);
+  }
+
+  /**
+   * Handle an inline preview <video> that YouTube injects into a
+   * thumbnail on hover.  If the video hasn't been approved, immediately
+   * pause and hide it so the user never sees unapproved content.
+   */
+  function handleInlinePreviewVideo(videoEl) {
+    const card = videoEl.closest(THUMB_CARD_SELECTORS);
+    if (!card) return;
+    const videoId = getVideoIdFromCard(card);
+    if (!videoId) return;
+
+    const cached = thumbChecked.get(videoId);
+    if (cached && cached.state === "allowed") {
+      // This video passed — let the preview play.
+      return;
+    }
+
+    // Not yet approved (pending or blocked or unknown) — kill the preview.
+    videoEl.pause();
+    videoEl.removeAttribute("src");
+    videoEl.load(); // reset to stop buffering
+    videoEl.style.display = "none";
+    log("Inline preview killed for", videoId, "— state:", cached?.state || "unknown");
+  }
+
   // The main MutationObserver: watches the entire document for added nodes.
   const domObserver = new MutationObserver((mutations) => {
     for (const mutation of mutations) {
@@ -489,7 +522,12 @@
 
         const videos = findVideosInTree(node);
         for (const videoEl of videos) {
-          onVideoFound(videoEl);
+          // Distinguish inline thumbnail previews from the main player.
+          if (isInlineThumbnailVideo(videoEl)) {
+            handleInlinePreviewVideo(videoEl);
+          } else {
+            onVideoFound(videoEl);
+          }
         }
       }
     }
@@ -523,8 +561,18 @@
       onVideoFound(video);
     }
 
-    // Re-scan thumbnails on SPA navigation (e.g. going back to homepage).
+    // YouTube rebuilds cards on SPA navigation, wiping our DOM elements.
+    // Clear the per-card markers so processThumbCard re-applies states
+    // from the thumbChecked cache (no new API calls needed for known IDs).
+    document.querySelectorAll("[data-ytkg-checked]").forEach((el) => {
+      delete el.dataset.ytkgChecked;
+    });
+
+    // Re-scan thumbnails. YouTube renders cards asynchronously after
+    // yt-navigate-finish, so scan multiple times to catch late arrivals.
     scanThumbnails();
+    setTimeout(scanThumbnails, 500);
+    setTimeout(scanThumbnails, 1500);
   });
 
   // ─── Thumbnail scanning ─────────────────────────────────────────────
