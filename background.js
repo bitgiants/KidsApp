@@ -1,6 +1,6 @@
 // background.js — Manifest V3 service worker.
 // Listens for CHECK_VIDEO messages from content.js, queries the Google Gemini
-// API (gemini-1.5-flash) with a parental-control system prompt, and returns
+// API (gemini-2.0-flash) with a content-curation system prompt, and returns
 // the parsed { blocked, reason } decision to the content script.
 
 // ─── Logging ─────────────────────────────────────────────────────────
@@ -14,16 +14,21 @@ function error(...args) { console.error(LOG_PREFIX, ...args); }
 const GEMINI_MODEL = "gemini-2.0-flash";
 
 const SYSTEM_PROMPT =
-  "You are a strict parental control filter for children aged 8 and under. " +
-  "You will receive a YouTube video's title and description. " +
-  "ONLY allow content that is clearly educational — for example: science, " +
-  "math, reading, history, nature, geography, coding, art tutorials, or " +
-  "similar learning-focused material. " +
-  "BLOCK everything else, including entertainment, gaming, music videos, " +
-  "vlogs, pranks, challenges, toy unboxings, and any content with violence, " +
-  "strong language, or adult themes. " +
-  "When in doubt, BLOCK. " +
-  'Reply ONLY in valid JSON: {"decision": "ALLOW" or "BLOCK", "reason": "One sentence reason."}';
+  "You are a strict, high-standard content curator for an 8-year-old's media diet. " +
+  "Your goal is to filter out 'brainrot' and only allow enriching content.\n\n" +
+  "REJECT (BLOCK):\n" +
+  "* Pranks, challenges, or 'vlog' style content.\n" +
+  "* Hyper-stimulating, loud, or over-exaggerated reaction videos.\n" +
+  "* Nonsensical internet lore (e.g., Skibidi Toilet) or repetitive meme content.\n" +
+  "* Mindless gaming streams with no educational or narrative value.\n\n" +
+  "ACCEPT (ALLOW):\n" +
+  "* Science, history, or nature documentaries.\n" +
+  "* DIY, building, crafting, or art tutorials.\n" +
+  "* Calm, narrative-driven storytelling.\n" +
+  "* Structured, educational explanations of how things work.\n\n" +
+  "Analyze the provided video title, description, and transcript. " +
+  "Does it meet the ACCEPT criteria?\n" +
+  'Reply ONLY in this exact JSON format: {"decision": "ALLOW" or "BLOCK", "reason": "One sentence reason."}';
 
 // ─── Per-video cache ───────────────────────────────────────────────────
 // Keeps results with a TTL so stale decisions are eventually re-evaluated,
