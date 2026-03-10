@@ -1,12 +1,17 @@
 {
   "name": "youtube-kids-guard",
   "version": "1.0.0",
-  "description": "",
+  "description": "Chrome extension that checks YouTube videos for child safety using the Gemini API.",
   "main": "background.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "setup": "npm install && node scripts/validate-setup.js",
+    "test": "jest --verbose",
+    "package": "node scripts/package.js"
   },
-  "keywords": [],
+  "keywords": ["chrome-extension", "youtube", "parental-controls", "kids-safety"],
   "author": "",
-  "license": "ISC"
+  "license": "ISC",
+  "devDependencies": {
+    "jest": "^29.7.0"
+  }
 }

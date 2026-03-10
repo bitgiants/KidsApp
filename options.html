@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>YouTube Kids Guard — Settings</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Segoe UI', Roboto, Arial, sans-serif;
+      background: #f5f5f5;
+      color: #212121;
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
+      padding: 2.5rem 1rem;
+    }
+    .card {
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+      padding: 2rem;
+      max-width: 480px;
+      width: 100%;
+      height: fit-content;
+    }
+    h1 {
+      font-size: 1.25rem;
+      font-weight: 600;
+      margin-bottom: 0.25rem;
+    }
+    .subtitle {
+      font-size: 0.85rem;
+      color: #757575;
+      margin-bottom: 1.5rem;
+    }
+    label {
+      display: block;
+      font-size: 0.9rem;
+      font-weight: 500;
+      margin-bottom: 0.4rem;
+    }
+    input[type="password"] {
+      width: 100%;
+      padding: 0.6rem 0.75rem;
+      font-size: 0.9rem;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    input[type="password"]:focus {
+      border-color: #2e7d32;
+    }
+    .btn-row {
+      display: flex;
+      gap: 0.75rem;
+      margin-top: 1.25rem;
+    }
+    button {
+      padding: 0.55rem 1.25rem;
+      font-size: 0.9rem;
+      font-weight: 500;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: opacity 0.2s;
+    }
+    button:hover { opacity: 0.85; }
+    .btn-save {
+      background: #2e7d32;
+      color: #fff;
+    }
+    .btn-clear {
+      background: #e0e0e0;
+      color: #424242;
+    }
+    .status {
+      margin-top: 1rem;
+      font-size: 0.85rem;
+      min-height: 1.2em;
+    }
+    .status--success { color: #2e7d32; }
+    .status--error { color: #c62828; }
+    .status--info { color: #757575; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>YouTube Kids Guard</h1>
+    <p class="subtitle">Configure your Gemini API key for video safety checks.</p>
+
+    <label for="apiKey">Gemini API Key</label>
+    <input type="password" id="apiKey" placeholder="Enter your API key" autocomplete="off">
+
+    <div class="btn-row">
+      <button class="btn-save" id="saveBtn">Save</button>
+      <button class="btn-clear" id="clearBtn">Clear Key</button>
+    </div>
+
+    <p class="status" id="status"></p>
+  </div>
+
+  <script src="options.js"></script>
+</body>
+</html>
