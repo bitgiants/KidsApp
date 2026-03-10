@@ -129,10 +129,23 @@
         cursor: default;
       }
 
-      /* Kill any inline preview <video> YouTube injects on hover */
+      /* Kill any inline preview <video> YouTube injects on hover.
+         ytd-video-preview is injected as a SIBLING of the thumbnail,
+         not inside it, so we use :has() to target it from the card. */
       ytd-thumbnail:not(.ytkg-approved) video,
       ytd-thumbnail:not(.ytkg-approved) ytd-video-preview,
       yt-thumbnail-view-model:not(.ytkg-approved) video {
+        display: none !important;
+      }
+
+      /* Card-level preview blocking — catches ytd-video-preview that
+         YouTube injects outside the thumbnail element (e.g. Shorts). */
+      ytd-rich-item-renderer:has(ytd-thumbnail:not(.ytkg-approved)) ytd-video-preview,
+      ytd-rich-item-renderer:has(yt-thumbnail-view-model:not(.ytkg-approved)) ytd-video-preview,
+      ytd-video-renderer:has(ytd-thumbnail:not(.ytkg-approved)) ytd-video-preview,
+      ytd-compact-video-renderer:has(ytd-thumbnail:not(.ytkg-approved)) ytd-video-preview,
+      ytm-shorts-lockup-view-model-v2:has(yt-thumbnail-view-model:not(.ytkg-approved)) ytd-video-preview,
+      ytd-reel-item-renderer:has(yt-thumbnail-view-model:not(.ytkg-approved)) ytd-video-preview {
         display: none !important;
       }
 
