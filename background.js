@@ -14,10 +14,39 @@ const SYSTEM_PROMPT =
   '{"decision": "ALLOW" or "BLOCK", "reason": "One sentence reason."}';
 
 // ─── Per-video cache ───────────────────────────────────────────────────
-// Keeps results for the lifetime of the service worker so we never re-check
-// the same video twice in one browser session.
+// Keeps results with a TTL so stale decisions are eventually re-evaluated,
+// and a max-size cap to prevent unbounded memory growth.
+
+const CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+const CACHE_MAX_SIZE = 200;
 
 const cache = new Map();
+
+/**
+ * Retrieve a cached result if it exists and has not expired.
+ */
+function cacheGet(key) {
+  const entry = cache.get(key);
+  if (!entry) return undefined;
+  if (Date.now() - entry.timestamp > CACHE_TTL_MS) {
+    cache.delete(key);
+    return undefined;
+  }
+  return entry.value;
+}
+
+/**
+ * Store a result in the cache.  If the cache exceeds its size limit the
+ * oldest entry is evicted (FIFO via Map insertion order).
+ */
+function cacheSet(key, value) {
+  // Evict oldest entries when at capacity.
+  while (cache.size >= CACHE_MAX_SIZE) {
+    const oldestKey = cache.keys().next().value;
+    cache.delete(oldestKey);
+  }
+  cache.set(key, { value, timestamp: Date.now() });
+}
 
 // ─── API key ───────────────────────────────────────────────────────────
 
@@ -152,9 +181,8 @@ async function evaluateVideo(payload) {
   const { videoId } = payload;
 
   // Return the cached result if we already checked this video.
-  if (cache.has(videoId)) {
-    return cache.get(videoId);
-  }
+  const cached = cacheGet(videoId);
+  if (cached) return cached;
 
   const apiKey = await getApiKey();
   const userPrompt = buildUserPrompt(payload);
@@ -166,30 +194,54 @@ async function evaluateVideo(payload) {
     reason,
   };
 
-  cache.set(videoId, result);
+  cacheSet(videoId, result);
   return result;
 }
 
 // ─── Message listener ──────────────────────────────────────────────────
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  // Only handle CHECK_VIDEO messages from the content script.
-  if (message.type !== "CHECK_VIDEO") return false;
+// ─── Message listener ──────────────────────────────────────────────────
+// Only register when running inside a Chrome extension context.
 
-  evaluateVideo(message.payload)
-    .then((result) => {
-      console.log("[YT Kids Guard]", result.blocked ? "BLOCK" : "ALLOW",
-        "—", result.reason);
-      sendResponse(result);
-    })
-    .catch((err) => {
-      console.error("[YT Kids Guard] evaluation failed:", err);
-      // Fail open — allow the video if the API call errors out so we
-      // don't permanently block the page on transient failures.
-      sendResponse({ blocked: false, reason: err.message });
-    });
+if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    // Only handle CHECK_VIDEO messages from the content script.
+    if (message.type !== "CHECK_VIDEO") return false;
 
-  // Return true so Chrome keeps the message channel open for our async
-  // sendResponse call above.
-  return true;
-});
+    evaluateVideo(message.payload)
+      .then((result) => {
+        console.log("[YT Kids Guard]", result.blocked ? "BLOCK" : "ALLOW",
+          "—", result.reason);
+        sendResponse(result);
+      })
+      .catch((err) => {
+        console.error("[YT Kids Guard] evaluation failed:", err);
+        // Fail closed — block the video when the safety check cannot
+        // complete.  For a kids' app it is safer to over-block than to
+        // accidentally allow inappropriate content.
+        sendResponse({
+          blocked: true,
+          reason: "Safety check unavailable — video blocked as a precaution.",
+        });
+      });
+
+    // Return true so Chrome keeps the message channel open for our async
+    // sendResponse call above.
+    return true;
+  });
+}
+
+// ─── Exports for testing ──────────────────────────────────────────────
+// In the extension context `module` is undefined; in Node/Jest it exists.
+
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = {
+    buildUserPrompt,
+    parseGeminiResponse,
+    cacheGet,
+    cacheSet,
+    cache,
+    CACHE_TTL_MS,
+    CACHE_MAX_SIZE,
+  };
+}

@@ -106,8 +106,8 @@
 
   // ─── State ───────────────────────────────────────────────────────────
 
-  // Track the last video src we analysed so we don't re-check the same source.
-  let lastCheckedSrc = null;
+  // Track the last video ID we analysed so we don't re-check the same video.
+  let lastCheckedVideoId = null;
 
   // Keep a reference to the attribute observer attached to the current <video>
   // so we can disconnect it before attaching a new one.
@@ -233,16 +233,48 @@
 
   // ─── Video handling ──────────────────────────────────────────────────
 
+  // ─── Metadata polling ─────────────────────────────────────────────────
+
+  /**
+   * Wait for YouTube to populate the video title in the DOM.
+   * Polls every 200 ms up to a maximum number of attempts, then resolves
+   * with whatever metadata is available (the URL alone is still useful).
+   */
+  function waitForMetadata(maxAttempts = 10, interval = 200) {
+    return new Promise((resolve) => {
+      let attempts = 0;
+      function poll() {
+        attempts++;
+        const metadata = getVideoMetadata();
+        // Consider metadata "ready" once we have a non-empty title that
+        // isn't just the generic document.title fallback.
+        const titleEl = document.querySelector(
+          "yt-formatted-string.style-scope.ytd-watch-metadata"
+        ) || document.querySelector("h1.ytd-watch-metadata");
+        if (titleEl?.textContent?.trim() || attempts >= maxAttempts) {
+          resolve(metadata);
+        } else {
+          setTimeout(poll, interval);
+        }
+      }
+      poll();
+    });
+  }
+
+  // ─── Video handling ──────────────────────────────────────────────────
+
   /**
    * Immediately pause the <video>, show the analyzing overlay, collect
    * metadata, and ask the background script to evaluate the video via Gemini.
    */
   function handleVideoChange(videoEl) {
-    const src = videoEl.src || videoEl.currentSrc;
+    const videoId = getVideoId();
 
-    // Avoid re-checking the exact same source (e.g. duplicate mutation events).
-    if (!src || src === lastCheckedSrc) return;
-    lastCheckedSrc = src;
+    // Avoid re-checking the same video (e.g. duplicate mutation events).
+    // Use the ?v= video ID when available; fall back to the element src.
+    const checkKey = videoId || videoEl.src || videoEl.currentSrc;
+    if (!checkKey || checkKey === lastCheckedVideoId) return;
+    lastCheckedVideoId = checkKey;
 
     // Instantly pause the video so nothing plays until we get a verdict.
     videoEl.pause();
@@ -250,17 +282,13 @@
     // Show the analyzing overlay on top of the player.
     showAnalyzingOverlay(videoEl);
 
-    const videoId = getVideoId();
-
-    // Slight delay to give YouTube's SPA time to render metadata in the DOM.
-    setTimeout(() => {
-      const metadata = getVideoMetadata();
-
+    // Poll for metadata instead of using a fixed timeout.
+    waitForMetadata().then((metadata) => {
       chrome.runtime.sendMessage(
         {
           type: "CHECK_VIDEO",
           payload: {
-            videoId: videoId || src,
+            videoId: checkKey,
             url: window.location.href,
             ...metadata,
           },
@@ -271,9 +299,11 @@
               "[YT Kids Guard] messaging error:",
               chrome.runtime.lastError.message
             );
-            // Fail open — remove the overlay and resume playback.
-            removeOverlay();
-            videoEl.play();
+            // Fail closed — block the video when the safety check
+            // cannot complete.
+            showBlockedOverlay(
+              "Safety check unavailable — video blocked as a precaution."
+            );
             return;
           }
 
@@ -287,7 +317,7 @@
           }
         }
       );
-    }, 800);
+    });
   }
 
   // ─── Attribute observer (watches `src` changes on a single <video>) ──
@@ -378,4 +408,20 @@
   if (existingVideo) {
     onVideoFound(existingVideo);
   }
+
+  // ─── YouTube SPA navigation ──────────────────────────────────────────
+  // YouTube fires `yt-navigate-finish` when the user clicks a video link
+  // inside the SPA.  The <video> element is often reused without a src
+  // attribute change, so we must re-check whenever navigation occurs.
+
+  window.addEventListener("yt-navigate-finish", () => {
+    // Reset the dedup key so the same <video> element is re-evaluated
+    // for the new page.
+    lastCheckedVideoId = null;
+
+    const video = document.querySelector("video");
+    if (video) {
+      onVideoFound(video);
+    }
+  });
 })();
