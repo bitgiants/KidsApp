@@ -11,7 +11,7 @@ function error(...args) { console.error(LOG_PREFIX, ...args); }
 
 // ─── Configuration ─────────────────────────────────────────────────────
 
-const GEMINI_MODEL = "gemini-1.5-flash";
+const GEMINI_MODEL = "gemini-2.0-flash";
 
 const SYSTEM_PROMPT =
   "You are a strict parental control filter for children aged 8 and under. " +
