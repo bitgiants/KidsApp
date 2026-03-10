@@ -104,6 +104,81 @@
       .ytkg-overlay__back-btn:hover {
         opacity: 0.85;
       }
+
+      /* ── Thumbnail badge & hover-block overlay ── */
+      .ytkg-thumb-wrap {
+        position: relative;
+      }
+
+      .ytkg-thumb-shield {
+        position: absolute;
+        inset: 0;
+        z-index: 999;
+        pointer-events: auto;
+        background: transparent;
+      }
+
+      .ytkg-thumb-badge {
+        position: absolute;
+        top: 6px;
+        left: 6px;
+        z-index: 1000;
+        width: 26px;
+        height: 26px;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 14px;
+        font-weight: bold;
+        color: #fff;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.4);
+        pointer-events: none;
+        transition: opacity 0.3s ease;
+      }
+
+      .ytkg-thumb-badge--pending {
+        background: rgba(80, 80, 80, 0.85);
+      }
+
+      .ytkg-thumb-badge--pending::after {
+        content: '';
+        width: 14px;
+        height: 14px;
+        border: 2px solid rgba(255,255,255,0.3);
+        border-top-color: #fff;
+        border-radius: 50%;
+        animation: ytkg-spin 0.8s linear infinite;
+      }
+
+      .ytkg-thumb-badge--allowed {
+        background: rgba(30, 140, 50, 0.9);
+      }
+
+      .ytkg-thumb-badge--blocked {
+        background: rgba(180, 30, 30, 0.9);
+      }
+
+      .ytkg-thumb-blocked-overlay {
+        position: absolute;
+        inset: 0;
+        z-index: 998;
+        background: rgba(0, 0, 0, 0.7);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        pointer-events: none;
+        border-radius: inherit;
+      }
+
+      .ytkg-thumb-blocked-overlay span {
+        color: #ff6b6b;
+        font-size: 11px;
+        font-weight: 500;
+        font-family: 'YouTube Noto', Roboto, Arial, sans-serif;
+        text-align: center;
+        padding: 4px 8px;
+      }
     `;
     document.head.appendChild(style);
   }
@@ -447,5 +522,273 @@
     if (video) {
       onVideoFound(video);
     }
+
+    // Re-scan thumbnails on SPA navigation (e.g. going back to homepage).
+    scanThumbnails();
+  });
+
+  // ─── Thumbnail scanning ─────────────────────────────────────────────
+  // On browse / search / home pages, find video thumbnail cards, extract
+  // their title + video ID, send them to the background for evaluation,
+  // and overlay a badge.  Hover-to-preview is blocked until the video
+  // passes verification.
+
+  // Track which video IDs have already been sent for evaluation so we
+  // don't spam the API on every scroll / mutation event.
+  const thumbChecked = new Map(); // videoId → "pending" | "allowed" | "blocked"
+
+  // CSS selectors for YouTube's various video card types.
+  const THUMB_CARD_SELECTORS = [
+    "ytd-rich-item-renderer",       // homepage grid
+    "ytd-video-renderer",           // search results
+    "ytd-compact-video-renderer",   // sidebar suggestions
+    "ytd-grid-video-renderer",      // channel page grid
+  ].join(", ");
+
+  /**
+   * Extract the video ID from a thumbnail card's link href.
+   * Returns null if not found.
+   */
+  function getVideoIdFromCard(card) {
+    const link = card.querySelector("a#thumbnail, a.ytd-thumbnail");
+    if (!link) return null;
+    const href = link.getAttribute("href") || "";
+    // Standard watch URL: /watch?v=XXXXXXXXXXX
+    const match = href.match(/\/watch\?v=([^&]+)/);
+    if (match) return match[1];
+    // Shorts URL: /shorts/XXXXXXXXXXX
+    const shortsMatch = href.match(/\/shorts\/([^?&]+)/);
+    if (shortsMatch) return shortsMatch[1];
+    return null;
+  }
+
+  /**
+   * Extract the video title from a thumbnail card.
+   */
+  function getTitleFromCard(card) {
+    const titleEl =
+      card.querySelector("#video-title") ||
+      card.querySelector("yt-formatted-string#video-title") ||
+      card.querySelector("span#video-title") ||
+      card.querySelector("a#video-title-link");
+    return titleEl?.textContent?.trim() || "";
+  }
+
+  /**
+   * Extract the channel name from a thumbnail card.
+   */
+  function getChannelFromCard(card) {
+    const channelEl =
+      card.querySelector("ytd-channel-name yt-formatted-string a") ||
+      card.querySelector("ytd-channel-name yt-formatted-string") ||
+      card.querySelector(".ytd-channel-name a");
+    return channelEl?.textContent?.trim() || "";
+  }
+
+  /**
+   * Detect if this card links to a YouTube Short.
+   */
+  function isShortCard(card) {
+    const link = card.querySelector("a#thumbnail, a.ytd-thumbnail");
+    const href = link?.getAttribute("href") || "";
+    return href.includes("/shorts/");
+  }
+
+  /**
+   * Get or create the wrapper element around a card's thumbnail that
+   * we use as a positioning context for badges and the hover shield.
+   */
+  function ensureThumbWrap(card) {
+    const existing = card.querySelector(".ytkg-thumb-wrap");
+    if (existing) return existing;
+
+    // Find the actual thumbnail container.
+    const thumbContainer =
+      card.querySelector("ytd-thumbnail") ||
+      card.querySelector("#thumbnail");
+    if (!thumbContainer) return null;
+
+    // Ensure it is a positioning context.
+    const pos = getComputedStyle(thumbContainer).position;
+    if (pos === "static") {
+      thumbContainer.style.position = "relative";
+    }
+    thumbContainer.classList.add("ytkg-thumb-wrap");
+    return thumbContainer;
+  }
+
+  /**
+   * Apply the visual state (badge + optional shield/overlay) to a
+   * thumbnail card based on its evaluation status.
+   */
+  function applyThumbState(card, videoId, state, reason) {
+    const wrap = ensureThumbWrap(card);
+    if (!wrap) return;
+
+    // Remove any existing badge / shield / overlay from previous states.
+    wrap.querySelectorAll(
+      ".ytkg-thumb-badge, .ytkg-thumb-shield, .ytkg-thumb-blocked-overlay"
+    ).forEach((el) => el.remove());
+
+    // Badge
+    const badge = document.createElement("div");
+    badge.className = "ytkg-thumb-badge";
+
+    if (state === "pending") {
+      badge.classList.add("ytkg-thumb-badge--pending");
+      // Hover shield — blocks the inline preview from starting.
+      const shield = document.createElement("div");
+      shield.className = "ytkg-thumb-shield";
+      shield.title = "Checking if this video is kid-friendly…";
+      wrap.appendChild(shield);
+    } else if (state === "allowed") {
+      badge.classList.add("ytkg-thumb-badge--allowed");
+      badge.textContent = "\u2713"; // ✓
+    } else if (state === "blocked") {
+      badge.classList.add("ytkg-thumb-badge--blocked");
+      badge.textContent = "\u2717"; // ✗
+      // Dark overlay on blocked thumbnails.
+      const blockedOverlay = document.createElement("div");
+      blockedOverlay.className = "ytkg-thumb-blocked-overlay";
+      blockedOverlay.innerHTML = `<span>${escapeHtml(reason || "Blocked")}</span>`;
+      wrap.appendChild(blockedOverlay);
+      // Shield stays to prevent hover preview and clicks.
+      const shield = document.createElement("div");
+      shield.className = "ytkg-thumb-shield";
+      shield.title = reason || "This video is blocked.";
+      shield.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+      });
+      wrap.appendChild(shield);
+    }
+
+    wrap.appendChild(badge);
+  }
+
+  /**
+   * Process a single thumbnail card: extract metadata, send to background
+   * for evaluation, and manage the badge / hover-blocking lifecycle.
+   */
+  function processThumbCard(card) {
+    const videoId = getVideoIdFromCard(card);
+    if (!videoId) return;
+
+    // Already processed this card instance.
+    if (card.dataset.ytkgChecked === videoId) return;
+    card.dataset.ytkgChecked = videoId;
+
+    // If we already have a result for this video ID, apply it immediately.
+    const cached = thumbChecked.get(videoId);
+    if (cached && cached.state !== "pending") {
+      applyThumbState(card, videoId, cached.state, cached.reason);
+      return;
+    }
+
+    // Block Shorts thumbnails immediately.
+    if (isShortCard(card)) {
+      const reason = "YouTube Shorts are not allowed.";
+      thumbChecked.set(videoId, { state: "blocked", reason });
+      applyThumbState(card, videoId, "blocked", reason);
+      return;
+    }
+
+    // Show pending badge + hover shield while we wait.
+    if (!cached) {
+      thumbChecked.set(videoId, { state: "pending", reason: "" });
+    }
+    applyThumbState(card, videoId, "pending", "");
+
+    // If another card for the same videoId already triggered the API call,
+    // just wait — the result will be applied when it comes back.
+    if (cached) return;
+
+    const title = getTitleFromCard(card);
+    const channel = getChannelFromCard(card);
+
+    log("Thumb check:", videoId, title ? `"${title}"` : "(no title)");
+
+    chrome.runtime.sendMessage(
+      {
+        type: "CHECK_VIDEO",
+        payload: {
+          videoId,
+          title,
+          channel,
+          description: "",
+        },
+      },
+      (response) => {
+        if (chrome.runtime.lastError) {
+          error("Thumb check messaging error:", chrome.runtime.lastError.message);
+          // Fail closed.
+          thumbChecked.set(videoId, {
+            state: "blocked",
+            reason: "Safety check unavailable.",
+          });
+          updateAllCardsForVideo(videoId);
+          return;
+        }
+
+        const state = response?.blocked ? "blocked" : "allowed";
+        const reason = response?.reason || "";
+        thumbChecked.set(videoId, { state, reason });
+        log("Thumb result:", videoId, state, reason);
+        updateAllCardsForVideo(videoId);
+      }
+    );
+  }
+
+  /**
+   * When a result arrives for a videoId, update every card on the page
+   * that shows that video (there can be duplicates in search + sidebar).
+   */
+  function updateAllCardsForVideo(videoId) {
+    const cached = thumbChecked.get(videoId);
+    if (!cached) return;
+
+    document.querySelectorAll(THUMB_CARD_SELECTORS).forEach((card) => {
+      if (getVideoIdFromCard(card) === videoId) {
+        applyThumbState(card, videoId, cached.state, cached.reason);
+      }
+    });
+  }
+
+  /**
+   * Scan all visible thumbnail cards on the page.
+   * Called on initial load, SPA navigation, and DOM mutations.
+   */
+  function scanThumbnails() {
+    const cards = document.querySelectorAll(THUMB_CARD_SELECTORS);
+    for (const card of cards) {
+      processThumbCard(card);
+    }
+  }
+
+  // Scan existing thumbnails on page load.
+  scanThumbnails();
+
+  // Extend the existing DOM observer to also pick up new thumbnail cards
+  // as the user scrolls (infinite scroll loads new cards).
+  const thumbObserver = new MutationObserver((mutations) => {
+    let needsScan = false;
+    for (const mutation of mutations) {
+      for (const node of mutation.addedNodes) {
+        if (node.nodeType !== Node.ELEMENT_NODE) continue;
+        // Check if the added node itself is a card, or contains cards.
+        if (node.matches?.(THUMB_CARD_SELECTORS)) {
+          processThumbCard(node);
+        } else if (node.querySelectorAll) {
+          const cards = node.querySelectorAll(THUMB_CARD_SELECTORS);
+          if (cards.length > 0) needsScan = true;
+        }
+      }
+    }
+    if (needsScan) scanThumbnails();
+  });
+
+  thumbObserver.observe(document.body, {
+    childList: true,
+    subtree: true,
   });
 })();
