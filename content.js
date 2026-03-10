@@ -112,12 +112,14 @@
          YouTube's SPA DOM rebuilds because the rule is global CSS,
          not an injected DOM node. */
 
-      ytd-thumbnail {
+      ytd-thumbnail,
+      yt-thumbnail-view-model {
         position: relative !important;
       }
 
       /* Transparent shield — blocks hover & click on unapproved thumbs */
-      ytd-thumbnail:not(.ytkg-approved)::after {
+      ytd-thumbnail:not(.ytkg-approved)::after,
+      yt-thumbnail-view-model:not(.ytkg-approved)::after {
         content: '';
         position: absolute;
         inset: 0;
@@ -129,7 +131,8 @@
 
       /* Kill any inline preview <video> YouTube injects on hover */
       ytd-thumbnail:not(.ytkg-approved) video,
-      ytd-thumbnail:not(.ytkg-approved) ytd-video-preview {
+      ytd-thumbnail:not(.ytkg-approved) ytd-video-preview,
+      yt-thumbnail-view-model:not(.ytkg-approved) video {
         display: none !important;
       }
 
@@ -673,10 +676,12 @@
 
   // CSS selectors for YouTube's various video card types.
   const THUMB_CARD_SELECTORS = [
-    "ytd-rich-item-renderer",       // homepage grid
-    "ytd-video-renderer",           // search results
-    "ytd-compact-video-renderer",   // sidebar suggestions
-    "ytd-grid-video-renderer",      // channel page grid
+    "ytd-rich-item-renderer",              // homepage grid
+    "ytd-video-renderer",                  // search results
+    "ytd-compact-video-renderer",          // sidebar suggestions
+    "ytd-grid-video-renderer",             // channel page grid
+    "ytm-shorts-lockup-view-model-v2",     // shorts shelf (new)
+    "ytd-reel-item-renderer",              // shorts shelf (legacy)
   ].join(", ");
 
   /**
@@ -684,7 +689,12 @@
    * Returns null if not found.
    */
   function getVideoIdFromCard(card) {
-    const link = card.querySelector("a#thumbnail, a.ytd-thumbnail");
+    // Regular video cards use a#thumbnail; shorts cards use a with /shorts/ href.
+    const link =
+      card.querySelector("a#thumbnail, a.ytd-thumbnail") ||
+      card.querySelector("a.reel-item-endpoint") ||
+      card.querySelector("a.shortsLockupViewModelHostEndpoint") ||
+      card.querySelector("a[href*='/shorts/']");
     if (!link) return null;
     const href = link.getAttribute("href") || "";
     // Standard watch URL: /watch?v=XXXXXXXXXXX
@@ -704,8 +714,13 @@
       card.querySelector("#video-title") ||
       card.querySelector("yt-formatted-string#video-title") ||
       card.querySelector("span#video-title") ||
-      card.querySelector("a#video-title-link");
-    return titleEl?.textContent?.trim() || "";
+      card.querySelector("a#video-title-link") ||
+      // Shorts cards: title is in h3 > a > span or a[title]
+      card.querySelector("h3 a[title]") ||
+      card.querySelector(".shortsLockupViewModelHostMetadataTitle a");
+    // Shorts cards may have the title in the `title` attribute.
+    return titleEl?.getAttribute("title") ||
+           titleEl?.textContent?.trim() || "";
   }
 
   /**
@@ -723,7 +738,16 @@
    * Detect if this card links to a YouTube Short.
    */
   function isShortCard(card) {
-    const link = card.querySelector("a#thumbnail, a.ytd-thumbnail");
+    // Detect by tag name (shorts-specific elements).
+    const tag = card.tagName.toLowerCase();
+    if (tag === "ytm-shorts-lockup-view-model-v2" ||
+        tag === "ytd-reel-item-renderer") {
+      return true;
+    }
+    // Fall back to checking the link href.
+    const link =
+      card.querySelector("a#thumbnail, a.ytd-thumbnail") ||
+      card.querySelector("a[href*='/shorts/']");
     const href = link?.getAttribute("href") || "";
     return href.includes("/shorts/");
   }
@@ -733,6 +757,7 @@
    */
   function getThumbElement(card) {
     return card.querySelector("ytd-thumbnail") ||
+           card.querySelector("yt-thumbnail-view-model") ||
            card.querySelector("#thumbnail");
   }
 
