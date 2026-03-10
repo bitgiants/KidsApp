@@ -38,19 +38,28 @@ function buildSystemPrompt(blockedCategories) {
     .join("\n");
 
   return (
-    "You are a strict, high-standard content curator for an 8-year-old's media diet. " +
-    "Your goal is to filter out 'brainrot' and only allow enriching content.\n\n" +
+    "You are a thoughtful content curator for children aged 8–14. " +
+    "Your goal is to filter out 'brainrot' — mindless, overstimulating, or harmful content — " +
+    "while ALLOWING genuinely educational and enriching material, even on technical topics.\n\n" +
     "REJECT (BLOCK) any content in these categories:\n" +
     categoryList + "\n" +
     "* Any content with violence, strong language, adult themes, or sexual content.\n" +
-    "* Hyper-stimulating, loud, or over-exaggerated content.\n" +
+    "* Hyper-stimulating, loud, or over-exaggerated content designed to addict.\n" +
     "* Nonsensical or repetitive content with no educational value.\n\n" +
     "ACCEPT (ALLOW):\n" +
-    "* Science, history, or nature documentaries.\n" +
+    "* Science, history, nature, geography, or space documentaries and explainers.\n" +
+    "* Technology, programming, computer science, and IT tutorials or explainers.\n" +
+    "* Math, engineering, robotics, electronics, and maker content.\n" +
     "* DIY, building, crafting, or art tutorials.\n" +
-    "* Calm, narrative-driven storytelling.\n" +
+    "* Calm, narrative-driven storytelling and book discussions.\n" +
     "* Structured, educational explanations of how things work.\n" +
-    "* Age-appropriate entertainment that is calm and enriching.\n\n" +
+    "* Age-appropriate entertainment that is calm, creative, or enriching.\n" +
+    "* Language learning and educational content in any language.\n\n" +
+    "IMPORTANT: Technical and computer-related educational content (hardware reviews " +
+    "for learning, coding tutorials, tech explainers, science experiments) should be " +
+    "ALLOWED even if the topic seems advanced. Children aged 8–14 benefit from exposure " +
+    "to STEM subjects. Only block tech content if it is purely consumerist hype with " +
+    "no learning value.\n\n" +
     "Analyze the provided video title, description, and channel name. " +
     "Does it meet the ACCEPT criteria?\n" +
     'Reply ONLY in this exact JSON format: {"decision": "ALLOW" or "BLOCK", "reason": "One sentence reason."}'
@@ -395,6 +404,26 @@ if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
             blocked: true,
             reason: "Safety check unavailable — video blocked as a precaution.",
           });
+        });
+      return true;
+    }
+
+    if (message.type === "CHECK_CHANNEL") {
+      const { channel } = message;
+      log("CHECK_CHANNEL received for:", channel);
+      getSettings()
+        .then((settings) => {
+          if (isChannelInList(channel, settings.whitelist)) {
+            sendResponse({ blocked: false, reason: "Whitelisted channel." });
+          } else if (isChannelInList(channel, settings.blacklist)) {
+            sendResponse({ blocked: true, reason: "Blacklisted channel." });
+          } else {
+            sendResponse({ blocked: false, reason: "Channel not in any list." });
+          }
+        })
+        .catch((err) => {
+          error("CHECK_CHANNEL failed:", err.message);
+          sendResponse({ blocked: false, reason: "" });
         });
       return true;
     }

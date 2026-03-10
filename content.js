@@ -194,11 +194,114 @@
         text-align: center;
         padding: 4px 8px;
       }
+
+      /* ── Full-page channel block overlay ── */
+      .ytkg-channel-block {
+        position: fixed;
+        inset: 0;
+        z-index: 2147483647;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        background: rgba(180, 30, 30, 0.97);
+        color: #fff;
+        font-family: 'YouTube Noto', Roboto, Arial, sans-serif;
+        text-align: center;
+        padding: 2rem;
+      }
+      .ytkg-channel-block__title {
+        font-size: 1.5rem;
+        font-weight: 600;
+        margin-bottom: 0.75rem;
+      }
+      .ytkg-channel-block__reason {
+        font-size: 1rem;
+        opacity: 0.9;
+        margin-bottom: 1.5rem;
+        max-width: 400px;
+      }
     `;
     document.head.appendChild(style);
   }
 
   injectStyles();
+
+  // ─── Channel page blocking ─────────────────────────────────────────
+  // Detect channel URLs (/@handle, /c/Name, /channel/ID) and check
+  // the blacklist/whitelist.  Blocked channels get a full-page overlay.
+
+  const CHANNEL_BLOCK_ID = "ytkg-channel-block";
+
+  /**
+   * Extract the channel handle from a YouTube channel page URL.
+   * Matches /@handle, /c/Name, /channel/UCxxxx patterns.
+   * Returns null if not on a channel page.
+   */
+  function getChannelFromURL() {
+    const path = window.location.pathname;
+    // /@handle or /@handle/videos etc.
+    const handleMatch = path.match(/^\/@([^/]+)/);
+    if (handleMatch) return handleMatch[1];
+    // /c/ChannelName
+    const cMatch = path.match(/^\/c\/([^/]+)/);
+    if (cMatch) return cMatch[1];
+    // /channel/UCxxxx — less useful but still a channel page
+    const idMatch = path.match(/^\/channel\/([^/]+)/);
+    if (idMatch) return idMatch[1];
+    return null;
+  }
+
+  function showChannelBlockOverlay(channelName, reason) {
+    removeChannelBlockOverlay();
+    const overlay = document.createElement("div");
+    overlay.id = CHANNEL_BLOCK_ID;
+    overlay.className = "ytkg-channel-block";
+    overlay.innerHTML = `
+      <p class="ytkg-channel-block__title">Channel Blocked</p>
+      <p class="ytkg-channel-block__reason">${escapeHtml(reason || "This channel is not allowed.")}</p>
+      <p class="ytkg-channel-block__reason">@${escapeHtml(channelName)}</p>
+      <button class="ytkg-overlay__back-btn" id="ytkg-channel-back-btn">Go Back</button>
+    `;
+    document.body.appendChild(overlay);
+    document.getElementById("ytkg-channel-back-btn").addEventListener("click", () => {
+      history.back();
+    });
+    // Also pause any playing video.
+    const video = document.querySelector("video");
+    if (video) video.pause();
+  }
+
+  function removeChannelBlockOverlay() {
+    document.getElementById(CHANNEL_BLOCK_ID)?.remove();
+  }
+
+  function checkChannelPage() {
+    const channelHandle = getChannelFromURL();
+    if (!channelHandle) {
+      removeChannelBlockOverlay();
+      return;
+    }
+
+    chrome.runtime.sendMessage(
+      { type: "CHECK_CHANNEL", channel: channelHandle },
+      (response) => {
+        if (chrome.runtime.lastError) {
+          error("CHECK_CHANNEL error:", chrome.runtime.lastError.message);
+          return;
+        }
+        if (response?.blocked) {
+          log("Channel page BLOCKED:", channelHandle, response.reason);
+          showChannelBlockOverlay(channelHandle, response.reason);
+        } else {
+          removeChannelBlockOverlay();
+        }
+      }
+    );
+  }
+
+  // Check on initial load.
+  checkChannelPage();
 
   // ─── State ───────────────────────────────────────────────────────────
 
@@ -532,6 +635,9 @@
   // attribute change, so we must re-check whenever navigation occurs.
 
   window.addEventListener("yt-navigate-finish", () => {
+    // Check if we navigated to a blacklisted channel page.
+    checkChannelPage();
+
     // Reset the dedup key so the same <video> element is re-evaluated
     // for the new page.
     lastCheckedVideoId = null;
