@@ -10,6 +10,12 @@
 (function () {
   "use strict";
 
+  // ─── Logging ──────────────────────────────────────────────────────
+  const LOG_PREFIX = "[YT Kids Guard]";
+  function log(...args) { console.log(LOG_PREFIX, ...args); }
+  function warn(...args) { console.warn(LOG_PREFIX, ...args); }
+  function error(...args) { console.error(LOG_PREFIX, ...args); }
+
   // ─── Injected stylesheet ────────────────────────────────────────────
   // All overlay + spinner CSS lives here so it can be injected once and
   // referenced by class names throughout the script.
@@ -264,28 +270,26 @@
   // ─── Video handling ──────────────────────────────────────────────────
 
   /**
-   * Immediately pause the <video>, show the analyzing overlay, collect
-   * metadata, and ask the background script to evaluate the video via Gemini.
-   */
-  /**
    * Returns true if the current page is a YouTube Shorts URL.
    * Shorts URLs contain "/shorts/" in the path.
    */
   function isYouTubeShorts() {
-    return window.location.pathname.startsWith("/shorts/");
+    return window.location.pathname.includes("/shorts/");
   }
 
+  /**
+   * Immediately pause the <video>, show the analyzing overlay, collect
+   * metadata, and ask the background script to evaluate the video via Gemini.
+   */
   function handleVideoChange(videoEl) {
     const videoId = getVideoId();
 
     // ── Block YouTube Shorts entirely ──────────────────────────────────
-    // Shorts are short-form videos that bypass normal watch metadata and
-    // are not suitable for the curated educational experience we want.
+    // Shorts auto-scroll between videos without changing the URL path,
+    // so we block every time the video src changes on a /shorts/ page.
+    // No dedup — always re-block to catch scrolling between Shorts.
     if (isYouTubeShorts()) {
-      const shortsKey = "shorts:" + window.location.pathname;
-      if (shortsKey === lastCheckedVideoId) return;
-      lastCheckedVideoId = shortsKey;
-
+      log("Shorts detected — blocking:", window.location.href);
       videoEl.pause();
       showAnalyzingOverlay(videoEl);
       showBlockedOverlay("YouTube Shorts are not allowed.");
@@ -298,6 +302,8 @@
     if (!checkKey || checkKey === lastCheckedVideoId) return;
     lastCheckedVideoId = checkKey;
 
+    log("Checking video:", checkKey);
+
     // Instantly pause the video so nothing plays until we get a verdict.
     videoEl.pause();
 
@@ -306,6 +312,7 @@
 
     // Poll for metadata instead of using a fixed timeout.
     waitForMetadata().then((metadata) => {
+      log("Metadata collected:", { title: metadata.title, description: metadata.description?.substring(0, 100) });
       chrome.runtime.sendMessage(
         {
           type: "CHECK_VIDEO",
@@ -317,12 +324,7 @@
         },
         (response) => {
           if (chrome.runtime.lastError) {
-            console.error(
-              "[YT Kids Guard] messaging error:",
-              chrome.runtime.lastError.message
-            );
-            // Fail closed — block the video when the safety check
-            // cannot complete.
+            error("Messaging error:", chrome.runtime.lastError.message);
             showBlockedOverlay(
               "Safety check unavailable — video blocked as a precaution."
             );
@@ -330,10 +332,10 @@
           }
 
           if (response?.blocked) {
-            // BLOCK — transition overlay to red with the reason.
+            log("BLOCKED:", response.reason);
             showBlockedOverlay(response.reason);
           } else {
-            // ALLOW — remove overlay and resume playback.
+            log("ALLOWED:", response?.reason);
             removeOverlay();
             videoEl.play();
           }

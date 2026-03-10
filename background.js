@@ -3,6 +3,12 @@
 // API (gemini-1.5-flash) with a parental-control system prompt, and returns
 // the parsed { blocked, reason } decision to the content script.
 
+// ─── Logging ─────────────────────────────────────────────────────────
+const LOG_PREFIX = "[YT Kids Guard]";
+function log(...args) { console.log(LOG_PREFIX, ...args); }
+function warn(...args) { console.warn(LOG_PREFIX, ...args); }
+function error(...args) { console.error(LOG_PREFIX, ...args); }
+
 // ─── Configuration ─────────────────────────────────────────────────────
 
 const GEMINI_MODEL = "gemini-1.5-flash";
@@ -100,6 +106,8 @@ async function queryGemini(apiKey, userPrompt) {
     `https://generativelanguage.googleapis.com/v1beta/models/` +
     `${GEMINI_MODEL}:generateContent?key=${apiKey}`;
 
+  log("Sending prompt to Gemini:\n" + userPrompt);
+
   const body = {
     // System-level instruction — the parental-control persona.
     systemInstruction: {
@@ -118,14 +126,21 @@ async function queryGemini(apiKey, userPrompt) {
     },
   };
 
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  let response;
+  try {
+    response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch (fetchErr) {
+    error("Network error calling Gemini:", fetchErr.message);
+    throw fetchErr;
+  }
 
   if (!response.ok) {
     const errorText = await response.text();
+    error("Gemini API error:", response.status, errorText);
     throw new Error(`Gemini API ${response.status}: ${errorText}`);
   }
 
@@ -133,9 +148,11 @@ async function queryGemini(apiKey, userPrompt) {
   const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
 
   if (!rawText) {
+    error("Gemini returned empty response. Full payload:", JSON.stringify(data));
     throw new Error("Gemini returned an empty response.");
   }
 
+  log("Gemini raw response:", rawText);
   return parseGeminiResponse(rawText);
 }
 
@@ -187,7 +204,10 @@ async function evaluateVideo(payload) {
 
   // Return the cached result if we already checked this video.
   const cached = cacheGet(videoId);
-  if (cached) return cached;
+  if (cached) {
+    log("Cache hit for", videoId, "→", cached.blocked ? "BLOCK" : "ALLOW");
+    return cached;
+  }
 
   const apiKey = await getApiKey();
   const userPrompt = buildUserPrompt(payload);
@@ -211,14 +231,14 @@ if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
     // Only handle CHECK_VIDEO messages from the content script.
     if (message.type !== "CHECK_VIDEO") return false;
 
+    log("CHECK_VIDEO received for:", message.payload.videoId);
     evaluateVideo(message.payload)
       .then((result) => {
-        console.log("[YT Kids Guard]", result.blocked ? "BLOCK" : "ALLOW",
-          "—", result.reason);
+        log(result.blocked ? "BLOCK" : "ALLOW", "—", result.reason);
         sendResponse(result);
       })
       .catch((err) => {
-        console.error("[YT Kids Guard] evaluation failed:", err);
+        error("Evaluation failed:", err.message, err.stack);
         // Fail closed — block the video when the safety check cannot
         // complete.  For a kids' app it is safer to over-block than to
         // accidentally allow inappropriate content.
