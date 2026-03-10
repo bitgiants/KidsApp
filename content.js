@@ -129,23 +129,10 @@
         cursor: default;
       }
 
-      /* Kill any inline preview <video> YouTube injects on hover.
-         ytd-video-preview is a SINGLETON under ytd-app (not inside any
-         card) that YouTube repositions over whichever thumbnail is
-         hovered.  We hide the video player INSIDE it (not the element
-         itself, which YouTube depends on for layout). JS adds
-         .ytkg-preview-ok when the hovered video is approved. */
+      /* Kill any inline preview <video> YouTube injects on hover */
       ytd-thumbnail:not(.ytkg-approved) video,
+      ytd-thumbnail:not(.ytkg-approved) ytd-video-preview,
       yt-thumbnail-view-model:not(.ytkg-approved) video {
-        display: none !important;
-      }
-
-      /* Global preview player — block the actual video/player inside
-         ytd-video-preview, but leave the container itself intact so
-         YouTube's layout and lifecycle management still works. */
-      ytd-video-preview:not(.ytkg-preview-ok) video.video-stream,
-      ytd-video-preview:not(.ytkg-preview-ok) .html5-video-player,
-      ytd-video-preview:not(.ytkg-preview-ok) #player-container-wrapper {
         display: none !important;
       }
 
@@ -626,8 +613,6 @@
         for (const videoEl of videos) {
           // Skip videos inside thumbnail cards — CSS handles those.
           if (videoEl.closest(THUMB_CARD_SELECTORS)) continue;
-          // Skip videos inside the inline preview player — gated separately.
-          if (videoEl.closest("ytd-video-preview")) continue;
           onVideoFound(videoEl);
         }
       }
@@ -639,76 +624,6 @@
     childList: true,
     subtree: true,
   });
-
-  // Track which video IDs have already been sent for evaluation so we
-  // don't spam the API on every scroll / mutation event.
-  const thumbChecked = new Map(); // videoId → "pending" | "allowed" | "blocked"
-
-  // ─── Inline preview player gating ───────────────────────────────────
-  // ytd-video-preview is a singleton element under ytd-app that YouTube
-  // positions over whichever thumbnail the user hovers.  CSS hides it by
-  // default (display:none on :not(.ytkg-preview-ok)).  Here we watch for
-  // attribute changes on it (YouTube sets `active`, `playing`, and updates
-  // the internal link href) and toggle .ytkg-preview-ok only when the
-  // previewed video has been approved.
-
-  function gatePreviewPlayer() {
-    const previewEl = document.querySelector("ytd-video-preview");
-    if (!previewEl) return;
-
-    function updatePreviewGate() {
-      // Extract video ID from the preview's internal link.
-      const link = previewEl.querySelector(
-        "a#media-container-link, a.yt-simple-endpoint"
-      );
-      const href = link?.getAttribute("href") || "";
-      let videoId = null;
-      const watchMatch = href.match(/\/watch\?v=([^&]+)/);
-      if (watchMatch) videoId = watchMatch[1];
-      const shortsMatch = href.match(/\/shorts\/([^?&]+)/);
-      if (shortsMatch) videoId = shortsMatch[1];
-
-      if (videoId && thumbChecked.get(videoId) === "allowed") {
-        previewEl.classList.add("ytkg-preview-ok");
-      } else {
-        previewEl.classList.remove("ytkg-preview-ok");
-      }
-    }
-
-    // Observe attribute changes (active/hidden/style) and child additions
-    // (YouTube lazily builds the preview DOM).
-    const previewObserver = new MutationObserver(() => {
-      updatePreviewGate();
-    });
-    previewObserver.observe(previewEl, {
-      attributes: true,
-      childList: true,
-      subtree: true,
-    });
-
-    // Also run on initial load in case it already exists.
-    updatePreviewGate();
-  }
-
-  // ytd-video-preview may not exist yet; watch for it.
-  const previewWatcher = new MutationObserver((mutations) => {
-    for (const mutation of mutations) {
-      for (const node of mutation.addedNodes) {
-        if (node.nodeType !== Node.ELEMENT_NODE) continue;
-        if (
-          node.tagName === "YTD-VIDEO-PREVIEW" ||
-          node.querySelector?.("ytd-video-preview")
-        ) {
-          gatePreviewPlayer();
-          previewWatcher.disconnect();
-          return;
-        }
-      }
-    }
-  });
-  previewWatcher.observe(document.body, { childList: true, subtree: true });
-  // Also try immediately in case it already exists.
-  gatePreviewPlayer();
 
   // ─── Handle a <video> that already exists on initial page load ───────
 
@@ -754,6 +669,10 @@
   // their title + video ID, send them to the background for evaluation,
   // and overlay a badge.  Hover-to-preview is blocked until the video
   // passes verification.
+
+  // Track which video IDs have already been sent for evaluation so we
+  // don't spam the API on every scroll / mutation event.
+  const thumbChecked = new Map(); // videoId → "pending" | "allowed" | "blocked"
 
   // CSS selectors for YouTube's various video card types.
   const THUMB_CARD_SELECTORS = [
