@@ -347,17 +347,27 @@
       document.querySelector("h1.ytd-watch-metadata")?.textContent?.trim() ||
       document.title;
 
-    const channel =
-      document.querySelector(
-        "ytd-channel-name yt-formatted-string a"
-      )?.textContent?.trim() || "";
+    // Channel display name (e.g. "Innuendo Studios").
+    const channelLink = document.querySelector(
+      "ytd-video-owner-renderer ytd-channel-name yt-formatted-string a"
+    ) || document.querySelector(
+      "ytd-channel-name yt-formatted-string a"
+    );
+    const channel = channelLink?.textContent?.trim() || "";
+
+    // Extract @handle from the channel link's href (e.g. "/@InnuendoStudios" → "InnuendoStudios").
+    // This is what users type in whitelist/blacklist and is a stable identifier.
+    let channelHandle = "";
+    const href = channelLink?.getAttribute("href") || "";
+    const handleMatch = href.match(/^\/@([^/?]+)/);
+    if (handleMatch) channelHandle = handleMatch[1];
 
     const description =
       document.querySelector(
         "ytd-text-inline-expander .ytd-text-inline-expander"
       )?.textContent?.trim() || "";
 
-    return { title, channel, description };
+    return { title, channel, channelHandle, description };
   }
 
   // ─── Overlay management ──────────────────────────────────────────────
@@ -745,6 +755,18 @@
   }
 
   /**
+   * Extract the @handle from a thumbnail card's channel link href.
+   */
+  function getChannelHandleFromCard(card) {
+    const link =
+      card.querySelector("ytd-channel-name yt-formatted-string a[href]") ||
+      card.querySelector(".ytd-channel-name a[href]");
+    const href = link?.getAttribute("href") || "";
+    const match = href.match(/^\/@([^/?]+)/);
+    return match ? match[1] : "";
+  }
+
+  /**
    * Detect if this card links to a YouTube Short.
    */
   function isShortCard(card) {
@@ -858,8 +880,9 @@
 
     const title = getTitleFromCard(card);
     const channel = getChannelFromCard(card);
+    const channelHandle = getChannelHandleFromCard(card);
 
-    log("Thumb check:", videoId, title ? `"${title}"` : "(no title)");
+    log("Thumb check:", videoId, title ? `"${title}"` : "(no title)", channelHandle ? `@${channelHandle}` : "");
 
     chrome.runtime.sendMessage(
       {
@@ -868,6 +891,7 @@
           videoId,
           title,
           channel,
+          channelHandle,
           description: "",
         },
       },

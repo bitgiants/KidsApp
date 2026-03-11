@@ -1,6 +1,6 @@
 const {
   buildUserPrompt,
-  parseGeminiResponse,
+  parseAIResponse,
   cacheGet,
   cacheSet,
   cache,
@@ -44,12 +44,12 @@ describe("buildUserPrompt", () => {
   });
 });
 
-// ─── parseGeminiResponse ─────────────────────────────────────────────
+// ─── parseAIResponse ─────────────────────────────────────────────
 
-describe("parseGeminiResponse", () => {
+describe("parseAIResponse", () => {
   test("parses a bare JSON ALLOW response", () => {
     const raw = '{"decision": "ALLOW", "reason": "Suitable for children."}';
-    expect(parseGeminiResponse(raw)).toEqual({
+    expect(parseAIResponse(raw)).toEqual({
       decision: "ALLOW",
       reason: "Suitable for children.",
     });
@@ -57,7 +57,7 @@ describe("parseGeminiResponse", () => {
 
   test("parses a bare JSON BLOCK response", () => {
     const raw = '{"decision": "BLOCK", "reason": "Contains violence."}';
-    expect(parseGeminiResponse(raw)).toEqual({
+    expect(parseAIResponse(raw)).toEqual({
       decision: "BLOCK",
       reason: "Contains violence.",
     });
@@ -65,7 +65,7 @@ describe("parseGeminiResponse", () => {
 
   test("strips markdown json fences", () => {
     const raw = '```json\n{"decision": "ALLOW", "reason": "Safe."}\n```';
-    expect(parseGeminiResponse(raw)).toEqual({
+    expect(parseAIResponse(raw)).toEqual({
       decision: "ALLOW",
       reason: "Safe.",
     });
@@ -73,7 +73,7 @@ describe("parseGeminiResponse", () => {
 
   test("strips plain markdown fences", () => {
     const raw = '```\n{"decision": "BLOCK", "reason": "Bad."}\n```';
-    expect(parseGeminiResponse(raw)).toEqual({
+    expect(parseAIResponse(raw)).toEqual({
       decision: "BLOCK",
       reason: "Bad.",
     });
@@ -81,7 +81,7 @@ describe("parseGeminiResponse", () => {
 
   test("normalises lowercase decision to uppercase", () => {
     const raw = '{"decision": "allow", "reason": "Fine."}';
-    expect(parseGeminiResponse(raw)).toEqual({
+    expect(parseAIResponse(raw)).toEqual({
       decision: "ALLOW",
       reason: "Fine.",
     });
@@ -89,21 +89,21 @@ describe("parseGeminiResponse", () => {
 
   test("provides default reason when missing", () => {
     const raw = '{"decision": "BLOCK"}';
-    expect(parseGeminiResponse(raw).reason).toBe("No reason provided.");
+    expect(parseAIResponse(raw).reason).toBe("No reason provided.");
   });
 
   test("throws on invalid JSON", () => {
-    expect(() => parseGeminiResponse("not json")).toThrow("Failed to parse");
+    expect(() => parseAIResponse("not json")).toThrow("Failed to parse");
   });
 
   test("throws on unexpected decision value", () => {
     const raw = '{"decision": "MAYBE", "reason": "Unsure."}';
-    expect(() => parseGeminiResponse(raw)).toThrow("Unexpected decision");
+    expect(() => parseAIResponse(raw)).toThrow("Unexpected decision");
   });
 
   test("throws when decision is missing entirely", () => {
     const raw = '{"reason": "No decision field."}';
-    expect(() => parseGeminiResponse(raw)).toThrow("Unexpected decision");
+    expect(() => parseAIResponse(raw)).toThrow("Unexpected decision");
   });
 });
 

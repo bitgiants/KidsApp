@@ -32,38 +32,42 @@ const CATEGORIES = [
 
 // ─── System prompt builder ───────────────────────────────────────────
 
-function buildSystemPrompt(blockedCategories) {
+// The default prompt template.  {{BLOCKED_CATEGORIES}} is replaced at
+// runtime with the user's blocked-category bullet list.
+const DEFAULT_SYSTEM_PROMPT =
+  "You are a thoughtful content curator for children aged 8–14. " +
+  "Your goal is to filter out 'brainrot' — mindless, overstimulating, or harmful content — " +
+  "while ALLOWING genuinely educational and enriching material, even on technical topics.\n\n" +
+  "REJECT (BLOCK) any content in these categories:\n" +
+  "{{BLOCKED_CATEGORIES}}\n" +
+  "* Any content with violence, strong language, adult themes, or sexual content.\n" +
+  "* Hyper-stimulating, loud, or over-exaggerated content designed to addict.\n" +
+  "* Nonsensical or repetitive content with no educational value.\n\n" +
+  "ACCEPT (ALLOW):\n" +
+  "* Science, history, nature, geography, or space documentaries and explainers.\n" +
+  "* Technology, programming, computer science, and IT tutorials or explainers.\n" +
+  "* Math, engineering, robotics, electronics, and maker content.\n" +
+  "* DIY, building, crafting, or art tutorials.\n" +
+  "* Calm, narrative-driven storytelling and book discussions.\n" +
+  "* Structured, educational explanations of how things work.\n" +
+  "* Age-appropriate entertainment that is calm, creative, or enriching.\n" +
+  "* Language learning and educational content in any language.\n\n" +
+  "IMPORTANT: Technical and computer-related educational content (hardware reviews " +
+  "for learning, coding tutorials, tech explainers, science experiments) should be " +
+  "ALLOWED even if the topic seems advanced. Children aged 8–14 benefit from exposure " +
+  "to STEM subjects. Only block tech content if it is purely consumerist hype with " +
+  "no learning value.\n\n" +
+  "Analyze the provided video title, description, and channel name. " +
+  "Does it meet the ACCEPT criteria?\n" +
+  'Reply ONLY in this exact JSON format: {"decision": "ALLOW" or "BLOCK", "reason": "One sentence reason."}';
+
+function buildSystemPrompt(blockedCategories, customPromptTemplate) {
   const categoryList = blockedCategories
     .map((c) => `* ${c.label}`)
     .join("\n");
 
-  return (
-    "You are a thoughtful content curator for children aged 8–14. " +
-    "Your goal is to filter out 'brainrot' — mindless, overstimulating, or harmful content — " +
-    "while ALLOWING genuinely educational and enriching material, even on technical topics.\n\n" +
-    "REJECT (BLOCK) any content in these categories:\n" +
-    categoryList + "\n" +
-    "* Any content with violence, strong language, adult themes, or sexual content.\n" +
-    "* Hyper-stimulating, loud, or over-exaggerated content designed to addict.\n" +
-    "* Nonsensical or repetitive content with no educational value.\n\n" +
-    "ACCEPT (ALLOW):\n" +
-    "* Science, history, nature, geography, or space documentaries and explainers.\n" +
-    "* Technology, programming, computer science, and IT tutorials or explainers.\n" +
-    "* Math, engineering, robotics, electronics, and maker content.\n" +
-    "* DIY, building, crafting, or art tutorials.\n" +
-    "* Calm, narrative-driven storytelling and book discussions.\n" +
-    "* Structured, educational explanations of how things work.\n" +
-    "* Age-appropriate entertainment that is calm, creative, or enriching.\n" +
-    "* Language learning and educational content in any language.\n\n" +
-    "IMPORTANT: Technical and computer-related educational content (hardware reviews " +
-    "for learning, coding tutorials, tech explainers, science experiments) should be " +
-    "ALLOWED even if the topic seems advanced. Children aged 8–14 benefit from exposure " +
-    "to STEM subjects. Only block tech content if it is purely consumerist hype with " +
-    "no learning value.\n\n" +
-    "Analyze the provided video title, description, and channel name. " +
-    "Does it meet the ACCEPT criteria?\n" +
-    'Reply ONLY in this exact JSON format: {"decision": "ALLOW" or "BLOCK", "reason": "One sentence reason."}'
-  );
+  const template = customPromptTemplate || DEFAULT_SYSTEM_PROMPT;
+  return template.replace("{{BLOCKED_CATEGORIES}}", categoryList);
 }
 
 // ─── Provider registry ───────────────────────────────────────────────
@@ -132,6 +136,7 @@ async function getSettings() {
     "blockedCategories",
     "whitelist",
     "blacklist",
+    "customPrompt",
   ]);
   const provider = data.aiProvider || "gemini";
   const providerDef = PROVIDERS[provider];
@@ -159,8 +164,9 @@ async function getSettings() {
 
   const whitelist = data.whitelist || [];
   const blacklist = data.blacklist || [];
+  const customPrompt = data.customPrompt || "";
 
-  return { provider, providerDef, apiKey, model, blockedCategories, whitelist, blacklist };
+  return { provider, providerDef, apiKey, model, blockedCategories, whitelist, blacklist, customPrompt };
 }
 
 // ─── List matching helpers ───────────────────────────────────────────
@@ -335,7 +341,7 @@ async function queryAnthropic(apiKey, model, userPrompt, systemPrompt) {
 // ─── Main evaluation logic ───────────────────────────────────────────
 
 async function evaluateVideo(payload) {
-  const { videoId, channel } = payload;
+  const { videoId, channel, channelHandle } = payload;
 
   const cached = cacheGet(videoId);
   if (cached) {
@@ -346,9 +352,11 @@ async function evaluateVideo(payload) {
   const settings = await getSettings();
 
   // 1. Whitelist check — skip AI entirely.
+  //    Match on display name, @handle, or video ID.
   if (isChannelInList(channel, settings.whitelist) ||
+      isChannelInList(channelHandle, settings.whitelist) ||
       isVideoInList(videoId, settings.whitelist)) {
-    log("WHITELIST match for", channel || videoId);
+    log("WHITELIST match for", channelHandle || channel || videoId);
     const result = { blocked: false, reason: "Whitelisted channel." };
     cacheSet(videoId, result);
     return result;
@@ -356,15 +364,16 @@ async function evaluateVideo(payload) {
 
   // 2. Blacklist check — skip AI entirely.
   if (isChannelInList(channel, settings.blacklist) ||
+      isChannelInList(channelHandle, settings.blacklist) ||
       isVideoInList(videoId, settings.blacklist)) {
-    log("BLACKLIST match for", channel || videoId);
+    log("BLACKLIST match for", channelHandle || channel || videoId);
     const result = { blocked: true, reason: "Blacklisted channel." };
     cacheSet(videoId, result);
     return result;
   }
 
   // 3. AI evaluation with dynamic system prompt.
-  const systemPrompt = buildSystemPrompt(settings.blockedCategories);
+  const systemPrompt = buildSystemPrompt(settings.blockedCategories, settings.customPrompt);
   const userPrompt = buildUserPrompt(payload);
   const { decision, reason } = await settings.providerDef.query(
     settings.apiKey, settings.model, userPrompt, systemPrompt
@@ -438,6 +447,11 @@ if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
       return false;
     }
 
+    if (message.type === "GET_DEFAULT_PROMPT") {
+      sendResponse({ prompt: DEFAULT_SYSTEM_PROMPT });
+      return false;
+    }
+
     return false;
   });
 }
@@ -448,6 +462,7 @@ if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     PROVIDERS,
     CATEGORIES,
+    DEFAULT_SYSTEM_PROMPT,
     buildUserPrompt,
     buildSystemPrompt,
     parseAIResponse,
