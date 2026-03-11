@@ -44,10 +44,10 @@
         pointer-events: auto;
       }
 
-      /* ── State: analysing (opaque black) ── */
+      /* ── State: analysing (amber/yellow) ── */
       .ytkg-overlay--analyzing {
-        background: rgba(0, 0, 0, 0.95);
-        color: #e0e0e0;
+        background: rgba(180, 140, 20, 0.95);
+        color: #fff;
       }
 
       /* ── State: blocked (red) ── */
@@ -58,9 +58,9 @@
 
       /* ── Spinner (CSS-only ring) ── */
       .ytkg-spinner {
-        width: 48px;
-        height: 48px;
-        border: 4px solid rgba(255, 255, 255, 0.15);
+        width: 56px;
+        height: 56px;
+        border: 5px solid rgba(255, 255, 255, 0.2);
         border-top-color: #fff;
         border-radius: 50%;
         animation: ytkg-spin 0.8s linear infinite;
@@ -73,25 +73,25 @@
 
       /* ── Typography ── */
       .ytkg-overlay__title {
-        font-size: 1.15rem;
-        font-weight: 500;
+        font-size: 1.5rem;
+        font-weight: 600;
         margin: 0;
-        line-height: 1.5;
+        line-height: 1.4;
       }
 
       .ytkg-overlay__reason {
-        font-size: 0.95rem;
+        font-size: 1.15rem;
         font-weight: 400;
-        max-width: 420px;
+        max-width: 480px;
         line-height: 1.6;
         margin: 0.75rem 0 0;
-        opacity: 0.9;
+        opacity: 0.95;
       }
 
       .ytkg-overlay__back-btn {
         margin-top: 1.5rem;
-        padding: 0.6rem 1.75rem;
-        font-size: 0.95rem;
+        padding: 0.7rem 2rem;
+        font-size: 1.05rem;
         font-weight: 500;
         cursor: pointer;
         border: none;
@@ -408,7 +408,8 @@
     overlay.className = "ytkg-overlay ytkg-overlay--analyzing";
     overlay.innerHTML = `
       <div class="ytkg-spinner"></div>
-      <p class="ytkg-overlay__title">Analyzing video for kid-friendly content&hellip;</p>
+      <p class="ytkg-overlay__title">Analyzing video&hellip;</p>
+      <p class="ytkg-overlay__reason">Checking if this content is kid-friendly. This may take a few seconds.</p>
     `;
 
     container.appendChild(overlay);
