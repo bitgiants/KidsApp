@@ -137,6 +137,7 @@ async function getSettings() {
     "whitelist",
     "blacklist",
     "customPrompt",
+    "useTranscript",
   ]);
   const provider = data.aiProvider || "gemini";
   const providerDef = PROVIDERS[provider];
@@ -165,8 +166,9 @@ async function getSettings() {
   const whitelist = data.whitelist || [];
   const blacklist = data.blacklist || [];
   const customPrompt = data.customPrompt || "";
+  const useTranscript = data.useTranscript !== false; // default ON
 
-  return { provider, providerDef, apiKey, model, blockedCategories, whitelist, blacklist, customPrompt };
+  return { provider, providerDef, apiKey, model, blockedCategories, whitelist, blacklist, customPrompt, useTranscript };
 }
 
 // ─── List matching helpers ───────────────────────────────────────────
@@ -191,12 +193,106 @@ function isVideoInList(videoId, list) {
 
 // ─── Prompt construction ─────────────────────────────────────────────
 
-function buildUserPrompt({ title, description, channel }) {
+function buildUserPrompt({ title, description, channel, transcript }) {
   const parts = [];
   if (title) parts.push(`Title: ${title}`);
   if (channel) parts.push(`Channel: ${channel}`);
   if (description) parts.push(`Description: ${description}`);
+  if (transcript) parts.push(`Transcript (first ~2 min): ${transcript}`);
   return parts.join("\n") || "No metadata available.";
+}
+
+// ─── Transcript fetcher ─────────────────────────────────────────────
+
+// Maximum characters of transcript text to include in the AI prompt.
+const TRANSCRIPT_MAX_CHARS = 3000;
+
+/**
+ * Decode common HTML entities found in YouTube subtitle XML.
+ */
+function decodeEntities(str) {
+  return str
+    .replace(/&amp;/g, "&")
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&#(\d+);/g, (_m, code) => String.fromCharCode(Number(code)));
+}
+
+/**
+ * Fetch the auto-generated or uploaded transcript for a YouTube video.
+ *
+ * How it works:
+ * 1. Fetch the raw HTML of the video's watch page.
+ * 2. Extract the captionTracks JSON array via regex (avoids DOM parsing).
+ * 3. Prefer English captions; fall back to the first available track.
+ * 4. Fetch the XML subtitle file and strip tags to get plain text.
+ * 5. Truncate to ~TRANSCRIPT_MAX_CHARS for prompt efficiency.
+ *
+ * Returns null if no captions are available or on any error.
+ */
+async function getFastTranscript(videoId) {
+  try {
+    const response = await fetch(`https://www.youtube.com/watch?v=${videoId}`);
+    if (!response.ok) return null;
+    const html = await response.text();
+
+    // Extract the full captionTracks array so we can pick the best language.
+    const tracksRegex = /"captionTracks":(\[.*?\])/;
+    const tracksMatch = html.match(tracksRegex);
+    if (!tracksMatch?.[1]) {
+      log("No captions found for", videoId);
+      return null;
+    }
+
+    let tracks;
+    try {
+      tracks = JSON.parse(tracksMatch[1].replace(/\\u0026/g, "&"));
+    } catch {
+      // Fallback: try the simpler single-URL regex.
+      const simpleRegex = /"captionTracks":\[\{"baseUrl":"([^"]+)"/;
+      const simpleMatch = html.match(simpleRegex);
+      if (!simpleMatch?.[1]) return null;
+      tracks = [{ baseUrl: simpleMatch[1].replace(/\\u0026/g, "&") }];
+    }
+
+    // Prefer English, then fall back to first available track.
+    const enTrack = tracks.find(
+      (t) => t.languageCode === "en" || t.vssId?.includes(".en")
+    );
+    const track = enTrack || tracks[0];
+    if (!track?.baseUrl) return null;
+
+    const transcriptResponse = await fetch(track.baseUrl);
+    if (!transcriptResponse.ok) return null;
+    const xml = await transcriptResponse.text();
+
+    // Strip XML tags to get spoken text.
+    const textRegex = /<text[^>]*>(.*?)<\/text>/g;
+    const lines = [];
+    let m;
+    let charCount = 0;
+
+    while ((m = textRegex.exec(xml)) !== null) {
+      const line = decodeEntities(m[1]).trim();
+      if (!line) continue;
+      lines.push(line);
+      charCount += line.length;
+      // Stop once we have enough text for the AI to work with.
+      if (charCount >= TRANSCRIPT_MAX_CHARS) break;
+    }
+
+    if (lines.length === 0) return null;
+
+    const text = lines.join(" ");
+    log(`Transcript fetched for ${videoId}: ${text.length} chars, ${lines.length} lines`);
+    return text;
+  } catch (err) {
+    error("Transcript fetch failed for", videoId, err.message);
+    return null;
+  }
 }
 
 // ─── Response parsing (shared) ───────────────────────────────────────
@@ -379,7 +475,17 @@ async function evaluateVideo(payload) {
     return result;
   }
 
-  // 3. AI evaluation with dynamic system prompt.
+  // 3. Optionally fetch transcript for richer context.
+  if (settings.useTranscript && videoId) {
+    try {
+      const transcript = await getFastTranscript(videoId);
+      if (transcript) payload.transcript = transcript;
+    } catch (err) {
+      warn("Transcript fetch skipped:", err.message);
+    }
+  }
+
+  // 4. AI evaluation with dynamic system prompt.
   const systemPrompt = buildSystemPrompt(settings.blockedCategories, settings.customPrompt);
   const userPrompt = buildUserPrompt(payload);
   const { decision, reason } = await settings.providerDef.query(
@@ -473,6 +579,7 @@ if (typeof module !== "undefined" && module.exports) {
     buildUserPrompt,
     buildSystemPrompt,
     parseAIResponse,
+    decodeEntities,
     normalizeChannel,
     isChannelInList,
     isVideoInList,
