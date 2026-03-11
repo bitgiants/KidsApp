@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Segoe UI', Roboto, Arial, sans-serif;
+      width: 280px;
+      padding: 1.25rem;
+      background: #fff;
+      color: #212121;
+    }
+
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 1rem;
+    }
+    .header h1 {
+      font-size: 0.95rem;
+      font-weight: 600;
+    }
+    .status-dot {
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      display: inline-block;
+      margin-right: 0.4rem;
+      flex-shrink: 0;
+    }
+    .status-dot.on  { background: #2e7d32; }
+    .status-dot.off { background: #c62828; }
+
+    .status-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.75rem;
+      background: #f5f5f5;
+      border-radius: 8px;
+      margin-bottom: 0.75rem;
+    }
+    .status-row .label {
+      display: flex;
+      align-items: center;
+      font-size: 0.9rem;
+      font-weight: 500;
+    }
+
+    /* Toggle switch */
+    .toggle {
+      position: relative;
+      width: 44px;
+      height: 24px;
+      cursor: pointer;
+    }
+    .toggle input { display: none; }
+    .toggle .slider {
+      position: absolute;
+      inset: 0;
+      background: #bdbdbd;
+      border-radius: 24px;
+      transition: background 0.25s;
+    }
+    .toggle .slider::before {
+      content: '';
+      position: absolute;
+      width: 18px; height: 18px;
+      left: 3px; bottom: 3px;
+      background: #fff;
+      border-radius: 50%;
+      transition: transform 0.25s;
+    }
+    .toggle input:checked + .slider {
+      background: #2e7d32;
+    }
+    .toggle input:checked + .slider::before {
+      transform: translateX(20px);
+    }
+
+    /* PIN overlay */
+    .pin-overlay {
+      display: none;
+      margin-bottom: 0.75rem;
+      padding: 0.75rem;
+      background: #fff3e0;
+      border: 1px solid #ffe0b2;
+      border-radius: 8px;
+      text-align: center;
+    }
+    .pin-overlay.visible { display: block; }
+    .pin-overlay p {
+      font-size: 0.8rem;
+      color: #757575;
+      margin-bottom: 0.5rem;
+    }
+    .pin-overlay input {
+      width: 120px;
+      text-align: center;
+      font-size: 1.25rem;
+      letter-spacing: 0.4rem;
+      padding: 0.4rem;
+      border: 2px solid #ccc;
+      border-radius: 6px;
+      outline: none;
+    }
+    .pin-overlay input:focus { border-color: #e65100; }
+    .pin-error {
+      color: #c62828;
+      font-size: 0.78rem;
+      margin-top: 0.35rem;
+      min-height: 1em;
+    }
+
+    /* Links */
+    .links {
+      display: flex;
+      justify-content: center;
+      gap: 1rem;
+      padding-top: 0.25rem;
+    }
+    .links a {
+      font-size: 0.8rem;
+      color: #1565c0;
+      text-decoration: none;
+      cursor: pointer;
+    }
+    .links a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+
+  <div class="header">
+    <h1>YouTube Kids Guard</h1>
+  </div>
+
+  <div class="status-row">
+    <span class="label">
+      <span class="status-dot on" id="statusDot"></span>
+      <span id="statusText">Protection ON</span>
+    </span>
+    <label class="toggle">
+      <input type="checkbox" id="enableToggle" checked>
+      <span class="slider"></span>
+    </label>
+  </div>
+
+  <div class="pin-overlay" id="pinOverlay">
+    <p>Enter parent PIN to disable protection.</p>
+    <input type="password" id="pinInput" maxlength="4" inputmode="numeric" pattern="[0-9]*" autofocus>
+    <p class="pin-error" id="pinError"></p>
+  </div>
+
+  <div class="links">
+    <a id="settingsLink">Settings</a>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -16,6 +16,72 @@
   function warn(...args) { console.warn(LOG_PREFIX, ...args); }
   function error(...args) { console.error(LOG_PREFIX, ...args); }
 
+  // ─── Enabled state ────────────────────────────────────────────────
+  // The guard can be toggled on/off via the popup.  When disabled, all
+  // filtering stops and existing overlays/shields are removed.
+  let guardEnabled = true; // default ON
+
+  chrome.storage.local.get("guardEnabled", (data) => {
+    guardEnabled = data.guardEnabled !== false;
+    if (!guardEnabled) disableGuard();
+  });
+
+  chrome.storage.onChanged.addListener((changes) => {
+    if ("guardEnabled" in changes) {
+      guardEnabled = changes.guardEnabled.newValue !== false;
+      if (guardEnabled) {
+        log("Guard ENABLED — re-scanning page.");
+        enableGuard();
+      } else {
+        log("Guard DISABLED — removing all protections.");
+        disableGuard();
+      }
+    }
+  });
+
+  /**
+   * Remove all overlays, shields, and badges.  Let everything play freely.
+   */
+  function disableGuard() {
+    // Remove video overlays (using literals to avoid forward-ref issues).
+    document.getElementById("ytkg-overlay")?.remove();
+    document.getElementById("ytkg-channel-block")?.remove();
+
+    // Remove the injected stylesheet so all CSS shields disappear.
+    document.getElementById("ytkg-styles")?.remove();
+
+    // Remove per-card badges and dark overlays.
+    document.querySelectorAll(
+      ".ytkg-thumb-badge, .ytkg-thumb-blocked-overlay"
+    ).forEach((el) => el.remove());
+
+    // Mark all thumbnails as approved so any leftover inline styles don't block.
+    document.querySelectorAll(
+      "ytd-thumbnail, yt-thumbnail-view-model"
+    ).forEach((el) => el.classList.add("ytkg-approved"));
+  }
+
+  /**
+   * Re-inject the stylesheet and re-scan the page.
+   */
+  function enableGuard() {
+    injectStyles();
+    // Reset thumbnail approvals — CSS will re-shield them.
+    document.querySelectorAll(
+      "ytd-thumbnail.ytkg-approved, yt-thumbnail-view-model.ytkg-approved"
+    ).forEach((el) => el.classList.remove("ytkg-approved"));
+    // Clear card markers so they get re-processed.
+    document.querySelectorAll("[data-ytkg-checked]").forEach((el) => {
+      delete el.dataset.ytkgChecked;
+    });
+    thumbChecked.clear();
+    lastCheckedVideoId = null;
+    scanThumbnails();
+    const video = document.querySelector("video");
+    if (video) onVideoFound(video);
+    checkChannelPage();
+  }
+
   // ─── Injected stylesheet ────────────────────────────────────────────
   // All overlay + spinner CSS lives here so it can be injected once and
   // referenced by class names throughout the script.
@@ -44,10 +110,10 @@
         pointer-events: auto;
       }
 
-      /* ── State: analysing (opaque black) ── */
+      /* ── State: analysing (amber/yellow) ── */
       .ytkg-overlay--analyzing {
-        background: rgba(0, 0, 0, 0.95);
-        color: #e0e0e0;
+        background: rgba(180, 140, 20, 0.95);
+        color: #fff;
       }
 
       /* ── State: blocked (red) ── */
@@ -58,9 +124,9 @@
 
       /* ── Spinner (CSS-only ring) ── */
       .ytkg-spinner {
-        width: 48px;
-        height: 48px;
-        border: 4px solid rgba(255, 255, 255, 0.15);
+        width: 56px;
+        height: 56px;
+        border: 5px solid rgba(255, 255, 255, 0.2);
         border-top-color: #fff;
         border-radius: 50%;
         animation: ytkg-spin 0.8s linear infinite;
@@ -73,25 +139,25 @@
 
       /* ── Typography ── */
       .ytkg-overlay__title {
-        font-size: 1.15rem;
-        font-weight: 500;
+        font-size: 1.5rem;
+        font-weight: 600;
         margin: 0;
-        line-height: 1.5;
+        line-height: 1.4;
       }
 
       .ytkg-overlay__reason {
-        font-size: 0.95rem;
+        font-size: 1.15rem;
         font-weight: 400;
-        max-width: 420px;
+        max-width: 480px;
         line-height: 1.6;
         margin: 0.75rem 0 0;
-        opacity: 0.9;
+        opacity: 0.95;
       }
 
       .ytkg-overlay__back-btn {
         margin-top: 1.5rem;
-        padding: 0.6rem 1.75rem;
-        font-size: 0.95rem;
+        padding: 0.7rem 2rem;
+        font-size: 1.05rem;
         font-weight: 500;
         cursor: pointer;
         border: none;
@@ -288,6 +354,8 @@
   }
 
   function checkChannelPage() {
+    if (!guardEnabled) return;
+
     const channelHandle = getChannelFromURL();
     if (!channelHandle) {
       removeChannelBlockOverlay();
@@ -412,7 +480,8 @@
     overlay.className = "ytkg-overlay ytkg-overlay--analyzing";
     overlay.innerHTML = `
       <div class="ytkg-spinner"></div>
-      <p class="ytkg-overlay__title">Analyzing video for kid-friendly content&hellip;</p>
+      <p class="ytkg-overlay__title">Analyzing video&hellip;</p>
+      <p class="ytkg-overlay__reason">Checking if this content is kid-friendly. This may take a few seconds.</p>
     `;
 
     container.appendChild(overlay);
@@ -516,6 +585,8 @@
    * metadata, and ask the background script to evaluate the video via Gemini.
    */
   function handleVideoChange(videoEl) {
+    if (!guardEnabled) return;
+
     const videoId = getVideoId();
 
     // ── Block YouTube Shorts entirely ──────────────────────────────────
@@ -888,6 +959,8 @@
    * for evaluation, and manage the badge / hover-blocking lifecycle.
    */
   function processThumbCard(card) {
+    if (!guardEnabled) return;
+
     const videoId = getVideoIdFromCard(card);
     if (!videoId) return;
 

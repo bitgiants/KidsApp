@@ -53,6 +53,11 @@ const savePromptBtn = document.getElementById("savePromptBtn");
 const resetPromptBtn = document.getElementById("resetPromptBtn");
 const promptStatus = document.getElementById("promptStatus");
 
+// Analysis options
+const useTranscriptCb = document.getElementById("useTranscript");
+const saveAnalysisBtn = document.getElementById("saveAnalysisBtn");
+const analysisStatus = document.getElementById("analysisStatus");
+
 // Whitelist
 const whitelistInput = document.getElementById("whitelistInput");
 const addWhitelistBtn = document.getElementById("addWhitelistBtn");
@@ -186,6 +191,9 @@ function loadAllSettings() {
 
       // AI Prompt
       loadPrompt();
+
+      // Analysis options
+      loadAnalysisOptions();
 
       // Lists
       whitelist = data.whitelist || [];
@@ -458,6 +466,25 @@ resetPromptBtn.addEventListener("click", () => {
   });
 });
 
+// ─── Analysis options ───────────────────────────────────────────────
+
+function loadAnalysisOptions() {
+  chrome.storage.local.get("useTranscript", (data) => {
+    useTranscriptCb.checked = data.useTranscript !== false; // default ON
+  });
+}
+
+saveAnalysisBtn.addEventListener("click", () => {
+  chrome.storage.local.set({ useTranscript: useTranscriptCb.checked }, () => {
+    showStatus(analysisStatus,
+      useTranscriptCb.checked
+        ? "Transcript analysis enabled."
+        : "Transcript analysis disabled — using title/channel/description only.",
+      "success"
+    );
+  });
+});
+
 // ─── List management (whitelist + blacklist) ─────────────────────────
 
 function renderList(container, list, listName) {
@@ -523,7 +550,7 @@ blacklistInput.addEventListener("keydown", (e) => {
 
 exportBtn.addEventListener("click", () => {
   chrome.storage.local.get(
-    ["blockedCategories", "whitelist", "blacklist", "customPrompt"],
+    ["blockedCategories", "whitelist", "blacklist", "customPrompt", "useTranscript"],
     (data) => {
       const payload = {
         _format: "ytkg-settings-v1",
@@ -533,6 +560,7 @@ exportBtn.addEventListener("click", () => {
         blacklist: data.blacklist || [],
       };
       if (data.customPrompt) payload.customPrompt = data.customPrompt;
+      if (data.useTranscript !== undefined) payload.useTranscript = data.useTranscript;
       const blob = new Blob([JSON.stringify(payload, null, 2)], {
         type: "application/json",
       });
@@ -577,12 +605,16 @@ importFile.addEventListener("change", (e) => {
       if (data.customPrompt) {
         toSave.customPrompt = data.customPrompt;
       }
+      if (data.useTranscript !== undefined) {
+        toSave.useTranscript = data.useTranscript;
+      }
 
       chrome.storage.local.set(toSave, () => {
         renderList(whitelistItems, whitelist, "whitelist");
         renderList(blacklistItems, blacklist, "blacklist");
         loadCategories(toSave.blockedCategories);
         loadPrompt();
+        loadAnalysisOptions();
         showStatus(ieStatus, "Settings imported successfully.", "success");
       });
     } catch (err) {

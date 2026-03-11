@@ -297,6 +297,24 @@
       <p class="status" id="promptStatus"></p>
     </div>
 
+    <!-- Analysis options -->
+    <div class="card">
+      <h2>Analysis Options</h2>
+      <p class="hint">Control what data the AI uses when evaluating videos.</p>
+      <label class="category-item" id="transcriptToggle" style="width:fit-content; margin-bottom:0.5rem;">
+        <input type="checkbox" id="useTranscript" checked>
+        Use video transcript (subtitles)
+      </label>
+      <p class="hint" style="margin-top:0.25rem;">
+        When enabled, the AI also reads the first ~2 minutes of subtitles for more accurate decisions.
+        Slightly slower but catches misleading titles. Disable for faster checks using title/channel/description only.
+      </p>
+      <div class="btn-row">
+        <button class="btn-save" id="saveAnalysisBtn">Save</button>
+      </div>
+      <p class="status" id="analysisStatus"></p>
+    </div>
+
     <!-- Channel whitelist -->
     <div class="card">
       <h2>Whitelisted Channels</h2>
