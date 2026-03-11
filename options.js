@@ -20,7 +20,10 @@ const pinStatus = document.getElementById("pinStatus");
 
 // Provider
 const providerSelect = document.getElementById("providerSelect");
-const modelOverride = document.getElementById("modelOverride");
+const modelSelect = document.getElementById("modelSelect");
+const modelCustom = document.getElementById("modelCustom");
+const refreshModelsBtn = document.getElementById("refreshModelsBtn");
+const modelHint = document.getElementById("modelHint");
 const saveProviderBtn = document.getElementById("saveProviderBtn");
 const providerStatus = document.getElementById("providerStatus");
 
@@ -99,8 +102,19 @@ pinEntry.addEventListener("input", () => {
       (res) => {
         if (res?.ok) {
           unlockSettings();
+        } else if (res?.locked) {
+          const secs = Math.ceil((res.retryAfterMs || 60000) / 1000);
+          pinError.textContent = `Too many attempts. Try again in ${secs}s.`;
+          pinEntry.disabled = true;
+          pinEntry.value = "";
+          setTimeout(() => {
+            pinEntry.disabled = false;
+            pinError.textContent = "";
+            pinEntry.focus();
+          }, res.retryAfterMs || 60000);
         } else {
-          pinError.textContent = "Incorrect PIN. Try again.";
+          const left = res.attemptsLeft != null ? ` (${res.attemptsLeft} left)` : "";
+          pinError.textContent = `Incorrect PIN.${left} Try again.`;
           pinEntry.value = "";
           pinEntry.focus();
         }
@@ -128,15 +142,19 @@ setPinBtn.addEventListener("click", () => {
     showStatus(pinStatus, "PINs do not match.", "error");
     return;
   }
-  chrome.storage.local.set({ parentPin: pin }, () => {
-    newPinInput.value = "";
-    confirmPinInput.value = "";
-    showStatus(pinStatus, "PIN set. Settings are now locked.", "success");
+  chrome.runtime.sendMessage({ type: "SET_PIN", pin }, (res) => {
+    if (res?.ok) {
+      newPinInput.value = "";
+      confirmPinInput.value = "";
+      showStatus(pinStatus, "PIN set. Settings are now locked.", "success");
+    } else {
+      showStatus(pinStatus, res?.error || "Failed to set PIN.", "error");
+    }
   });
 });
 
 clearPinBtn.addEventListener("click", () => {
-  chrome.storage.local.remove("parentPin", () => {
+  chrome.runtime.sendMessage({ type: "CLEAR_PIN" }, () => {
     showStatus(pinStatus, "PIN removed. Settings are unlocked.", "info");
   });
 });
@@ -154,11 +172,14 @@ function loadAllSettings() {
     (data) => {
       // Provider
       if (data.aiProvider) providerSelect.value = data.aiProvider;
-      if (data.aiModel) modelOverride.value = data.aiModel;
       for (const [prov, sk] of Object.entries(storageKeys)) {
         if (data[sk]) keyInputs[prov].placeholder = MASKED;
       }
       updateProviderCards();
+
+      // Model: store the saved model and show in select or custom input.
+      savedModel = data.aiModel || "";
+      resetModelSelect(savedModel);
 
       // Categories
       loadCategories(data.blockedCategories);
@@ -188,8 +209,14 @@ providerSelect.addEventListener("change", updateProviderCards);
 saveProviderBtn.addEventListener("click", () => {
   const provider = providerSelect.value;
   const toSave = { aiProvider: provider };
-  const model = modelOverride.value.trim();
-  toSave.aiModel = model || "";
+
+  // Read model from select or custom input.
+  const selectedModel = modelSelect.value;
+  if (selectedModel === "__custom__") {
+    toSave.aiModel = modelCustom.value.trim();
+  } else {
+    toSave.aiModel = selectedModel || "";
+  }
 
   let keysSaved = 0;
   for (const [prov, sk] of Object.entries(storageKeys)) {
@@ -204,13 +231,143 @@ saveProviderBtn.addEventListener("click", () => {
         keyInputs[prov].placeholder = MASKED;
       }
     }
+    savedModel = toSave.aiModel;
     showStatus(providerStatus,
       `Saved. Active: ${provider}` +
-      (keysSaved ? ` (${keysSaved} key${keysSaved > 1 ? "s" : ""} updated).` : "."),
+      (toSave.aiModel ? ` (model: ${toSave.aiModel})` : " (default model)") +
+      (keysSaved ? ` — ${keysSaved} key${keysSaved > 1 ? "s" : ""} updated.` : "."),
       "success"
     );
   });
 });
+
+// ─── Model selection ─────────────────────────────────────────────────
+
+// Provider default models (mirrors PROVIDERS in background.js).
+const PROVIDER_DEFAULTS = {
+  gemini: "gemini-2.0-flash",
+  openai: "gpt-4o-mini",
+  anthropic: "claude-haiku-4-5-20251001",
+  openrouter: "google/gemini-2.0-flash-001",
+};
+
+let savedModel = "";
+
+/**
+ * Reset the model <select> to its initial state with just the default
+ * option.  If `currentModel` is non-empty and not a listed option, add
+ * it as a "Current" entry.
+ */
+function resetModelSelect(currentModel) {
+  const provider = providerSelect.value;
+  const defaultId = PROVIDER_DEFAULTS[provider] || "";
+  modelSelect.innerHTML = "";
+
+  // Default option.
+  const defOpt = document.createElement("option");
+  defOpt.value = "";
+  defOpt.textContent = `Default (${defaultId})`;
+  modelSelect.appendChild(defOpt);
+
+  // If a model is saved that isn't the default, show it.
+  if (currentModel && currentModel !== defaultId) {
+    const curOpt = document.createElement("option");
+    curOpt.value = currentModel;
+    curOpt.textContent = currentModel;
+    modelSelect.appendChild(curOpt);
+  }
+
+  // Custom option.
+  const customOpt = document.createElement("option");
+  customOpt.value = "__custom__";
+  customOpt.textContent = "Custom model\u2026";
+  modelSelect.appendChild(customOpt);
+
+  modelSelect.value = currentModel || "";
+  modelCustom.style.display = "none";
+  modelHint.textContent = `Save your API key, then click \u21BB to load available models.`;
+}
+
+// Show/hide custom input when "Custom model…" is selected.
+modelSelect.addEventListener("change", () => {
+  modelCustom.style.display = modelSelect.value === "__custom__" ? "block" : "none";
+});
+
+// When provider changes, reset model select with the new default.
+providerSelect.addEventListener("change", () => {
+  resetModelSelect("");
+});
+
+// Fetch models from the active provider's API.
+refreshModelsBtn.addEventListener("click", () => {
+  const provider = providerSelect.value;
+  const sk = storageKeys[provider];
+
+  // Get the API key: prefer unsaved input, fall back to stored key.
+  const inputKey = keyInputs[provider].value.trim();
+  if (inputKey) {
+    doFetchModels(provider, inputKey);
+  } else {
+    chrome.storage.local.get(sk, (data) => {
+      const storedKey = data[sk];
+      if (!storedKey) {
+        modelHint.textContent = "Enter and save an API key first.";
+        return;
+      }
+      doFetchModels(provider, storedKey);
+    });
+  }
+});
+
+function doFetchModels(provider, apiKey) {
+  modelHint.textContent = "Fetching models\u2026";
+  refreshModelsBtn.disabled = true;
+
+  chrome.runtime.sendMessage(
+    { type: "FETCH_MODELS", provider, apiKey },
+    (res) => {
+      refreshModelsBtn.disabled = false;
+      if (!res?.models?.length) {
+        modelHint.textContent = res?.error
+          ? `Failed: ${res.error}`
+          : "No models returned. Check your API key.";
+        return;
+      }
+
+      const defaultId = PROVIDER_DEFAULTS[provider] || "";
+      modelSelect.innerHTML = "";
+
+      // Default option.
+      const defOpt = document.createElement("option");
+      defOpt.value = "";
+      defOpt.textContent = `Default (${defaultId})`;
+      modelSelect.appendChild(defOpt);
+
+      // Fetched models.
+      for (const m of res.models) {
+        const opt = document.createElement("option");
+        opt.value = m.id;
+        opt.textContent = m.name !== m.id ? `${m.name}  (${m.id})` : m.id;
+        modelSelect.appendChild(opt);
+      }
+
+      // Custom option.
+      const customOpt = document.createElement("option");
+      customOpt.value = "__custom__";
+      customOpt.textContent = "Custom model\u2026";
+      modelSelect.appendChild(customOpt);
+
+      // Pre-select the saved model, or the default.
+      if (savedModel) {
+        modelSelect.value = savedModel;
+        // If the saved model isn't in the list, fall back to default.
+        if (modelSelect.value !== savedModel) modelSelect.value = "";
+      }
+
+      modelHint.textContent = `${res.models.length} models loaded.`;
+    }
+  );
+}
 
 // ─── Categories ──────────────────────────────────────────────────────
 

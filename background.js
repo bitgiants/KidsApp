@@ -390,10 +390,142 @@ async function evaluateVideo(payload) {
 
 // ─── PIN verification for settings access ────────────────────────────
 
+// SHA-256 hash so the raw PIN is never stored in chrome.storage.
+async function hashPin(pin) {
+  const data = new TextEncoder().encode(pin);
+  const buf = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(buf))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+// Rate-limiting: lock out after too many failed attempts.
+const MAX_PIN_ATTEMPTS = 5;
+const PIN_LOCKOUT_MS = 60 * 1000; // 1 minute
+const pinAttempts = { count: 0, lockedUntil: 0 };
+
 async function verifyPin(pin) {
   const { parentPin } = await chrome.storage.local.get("parentPin");
-  if (!parentPin) return true; // No PIN set yet — allow.
-  return parentPin === pin;
+  if (!parentPin) return { ok: true };
+
+  // Check lockout.
+  if (Date.now() < pinAttempts.lockedUntil) {
+    const retryMs = pinAttempts.lockedUntil - Date.now();
+    return { ok: false, locked: true, retryAfterMs: retryMs };
+  }
+
+  const hashed = await hashPin(pin);
+
+  // Migration: legacy unhashed 4-digit PINs get auto-upgraded on match.
+  const isLegacy = parentPin.length === 4 && /^\d{4}$/.test(parentPin);
+  const match = isLegacy ? parentPin === pin : parentPin === hashed;
+
+  if (match) {
+    pinAttempts.count = 0;
+    // Upgrade legacy plaintext PIN to hash.
+    if (isLegacy) {
+      await chrome.storage.local.set({ parentPin: hashed });
+      log("Migrated plaintext PIN to SHA-256 hash.");
+    }
+    return { ok: true };
+  }
+
+  // Failed attempt.
+  pinAttempts.count++;
+  if (pinAttempts.count >= MAX_PIN_ATTEMPTS) {
+    pinAttempts.lockedUntil = Date.now() + PIN_LOCKOUT_MS;
+    pinAttempts.count = 0;
+    warn(`PIN locked for ${PIN_LOCKOUT_MS / 1000}s after ${MAX_PIN_ATTEMPTS} failed attempts.`);
+    return { ok: false, locked: true, retryAfterMs: PIN_LOCKOUT_MS };
+  }
+  return { ok: false, locked: false, attemptsLeft: MAX_PIN_ATTEMPTS - pinAttempts.count };
+}
+
+async function setPin(pin) {
+  if (!/^\d{4}$/.test(pin)) {
+    return { ok: false, error: "PIN must be exactly 4 digits." };
+  }
+  const hashed = await hashPin(pin);
+  await chrome.storage.local.set({ parentPin: hashed });
+  return { ok: true };
+}
+
+async function clearPin() {
+  await chrome.storage.local.remove("parentPin");
+  return { ok: true };
+}
+
+// ─── Dynamic model fetching ─────────────────────────────────────────
+
+async function fetchModels(provider, apiKey) {
+  try {
+    switch (provider) {
+      case "gemini":
+        return await fetchGeminiModels(apiKey);
+      case "openai":
+        return await fetchOpenAICompatibleModels(
+          "https://api.openai.com/v1/models", apiKey, filterOpenAIModels
+        );
+      case "anthropic":
+        return getAnthropicModels();
+      case "openrouter":
+        return await fetchOpenAICompatibleModels(
+          "https://openrouter.ai/api/v1/models", apiKey, filterOpenRouterModels
+        );
+      default:
+        return [];
+    }
+  } catch (err) {
+    error("fetchModels failed:", err.message);
+    return [];
+  }
+}
+
+async function fetchGeminiModels(apiKey) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Gemini models API ${res.status}`);
+  const data = await res.json();
+  return (data.models || [])
+    .filter((m) => m.supportedGenerationMethods?.includes("generateContent"))
+    .map((m) => ({
+      id: m.name.replace(/^models\//, ""),
+      name: m.displayName || m.name,
+    }))
+    .sort((a, b) => a.id.localeCompare(b.id));
+}
+
+async function fetchOpenAICompatibleModels(endpoint, apiKey, filterFn) {
+  const headers = { "Content-Type": "application/json" };
+  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+  const res = await fetch(endpoint, { headers });
+  if (!res.ok) throw new Error(`Models API ${res.status}`);
+  const data = await res.json();
+  return filterFn(data.data || []);
+}
+
+function filterOpenAIModels(models) {
+  return models
+    .filter((m) => /^(gpt-|o[134]-|chatgpt-)/.test(m.id))
+    .map((m) => ({ id: m.id, name: m.id }))
+    .sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function filterOpenRouterModels(models) {
+  // OpenRouter returns thousands; keep models likely useful for content moderation.
+  return models
+    .map((m) => ({ id: m.id, name: m.name || m.id }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function getAnthropicModels() {
+  // Anthropic has no public model-listing API; return known models.
+  return [
+    { id: "claude-haiku-4-5-20251001", name: "Claude Haiku 4.5 (fastest, cheapest)" },
+    { id: "claude-sonnet-4-5-20250514", name: "Claude Sonnet 4.5" },
+    { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" },
+    { id: "claude-opus-4-6", name: "Claude Opus 4.6 (most capable)" },
+  ];
 }
 
 // ─── Message listener ────────────────────────────────────────────────
@@ -438,7 +570,28 @@ if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
     }
 
     if (message.type === "VERIFY_PIN") {
-      verifyPin(message.pin).then((ok) => sendResponse({ ok }));
+      verifyPin(message.pin).then((result) => sendResponse(result));
+      return true;
+    }
+
+    if (message.type === "SET_PIN") {
+      setPin(message.pin).then((result) => sendResponse(result));
+      return true;
+    }
+
+    if (message.type === "CLEAR_PIN") {
+      clearPin().then((result) => sendResponse(result));
+      return true;
+    }
+
+    if (message.type === "FETCH_MODELS") {
+      const { provider, apiKey } = message;
+      fetchModels(provider, apiKey)
+        .then((models) => sendResponse({ models }))
+        .catch((err) => {
+          error("FETCH_MODELS failed:", err.message);
+          sendResponse({ models: [], error: err.message });
+        });
       return true;
     }
 
@@ -474,5 +627,8 @@ if (typeof module !== "undefined" && module.exports) {
     cache,
     CACHE_TTL_MS,
     CACHE_MAX_SIZE,
+    filterOpenAIModels,
+    filterOpenRouterModels,
+    getAnthropicModels,
   };
 }
