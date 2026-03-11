@@ -343,6 +343,13 @@ async function queryAnthropic(apiKey, model, userPrompt, systemPrompt) {
 async function evaluateVideo(payload) {
   const { videoId, channel, channelHandle } = payload;
 
+  // If the guard is disabled, allow everything immediately.
+  const { guardEnabled } = await chrome.storage.local.get("guardEnabled");
+  if (guardEnabled === false) {
+    log("Guard DISABLED — auto-allowing", videoId);
+    return { blocked: false, reason: "Guard is disabled." };
+  }
+
   const cached = cacheGet(videoId);
   if (cached) {
     log("Cache hit for", videoId, "->", cached.blocked ? "BLOCK" : "ALLOW");
