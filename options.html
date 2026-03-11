@@ -144,6 +144,11 @@
     .pin-row { display: flex; gap: 0.75rem; align-items: flex-end; }
     .pin-row .field-group { flex: 1; margin-bottom: 0; }
 
+    /* Model row */
+    .model-row { display: flex; gap: 0.5rem; }
+    .model-row select { flex: 1; }
+    .model-row button { white-space: nowrap; font-size: 1.1rem; padding: 0.4rem 0.7rem; }
+
     /* Import/Export */
     .ie-row { display: flex; gap: 0.75rem; }
     #importFile { display: none; }
@@ -243,8 +248,15 @@
       </div>
 
       <div class="field-group">
-        <label for="modelOverride">Model Override (optional)</label>
-        <input type="text" id="modelOverride" placeholder="Leave blank for default">
+        <label for="modelSelect">Model</label>
+        <div class="model-row">
+          <select id="modelSelect">
+            <option value="">(Default for provider)</option>
+          </select>
+          <button type="button" class="btn-outline" id="refreshModelsBtn" title="Fetch available models from API">&#8635;</button>
+        </div>
+        <input type="text" id="modelCustom" placeholder="Enter custom model ID" style="display:none;margin-top:0.5rem;">
+        <p class="hint" id="modelHint">Save your API key, then click &#8635; to load available models.</p>
       </div>
 
       <div class="btn-row">
