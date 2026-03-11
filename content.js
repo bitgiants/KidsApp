@@ -319,6 +319,10 @@
   // Track the last video ID we analysed so we don't re-check the same video.
   let lastCheckedVideoId = null;
 
+  // Track the title from the last evaluated video so waitForMetadata can
+  // detect stale DOM content during SPA navigation.
+  let lastCheckedTitle = "";
+
   // Keep a reference to the attribute observer attached to the current <video>
   // so we can disconnect it before attaching a new one.
   let videoAttrObserver = null;
@@ -457,21 +461,37 @@
 
   /**
    * Wait for YouTube to populate the video title in the DOM.
-   * Polls every 200 ms up to a maximum number of attempts, then resolves
+   * Polls every 300 ms up to a maximum number of attempts, then resolves
    * with whatever metadata is available (the URL alone is still useful).
+   *
+   * IMPORTANT: During SPA navigation, the previous video's metadata may
+   * still be in the DOM when this function starts.  We compare against
+   * `previousTitle` and wait for the title to CHANGE before accepting it.
+   * This prevents caching a result under Video B's ID with Video A's
+   * metadata, which caused cross-contamination of block reasons.
    */
-  function waitForMetadata(maxAttempts = 10, interval = 200) {
+  function waitForMetadata(previousTitle = "", maxAttempts = 15, interval = 300) {
     return new Promise((resolve) => {
       let attempts = 0;
       function poll() {
         attempts++;
         const metadata = getVideoMetadata();
-        // Consider metadata "ready" once we have a non-empty title that
-        // isn't just the generic document.title fallback.
         const titleEl = document.querySelector(
           "yt-formatted-string.style-scope.ytd-watch-metadata"
         ) || document.querySelector("h1.ytd-watch-metadata");
-        if (titleEl?.textContent?.trim() || attempts >= maxAttempts) {
+        const currentTitle = titleEl?.textContent?.trim() || "";
+
+        // Metadata is "ready" when we have a title that:
+        //  1. Is non-empty (not just the generic document.title fallback)
+        //  2. Differs from the previous video's title (not stale DOM)
+        // OR we've exhausted our polling attempts (send best-effort data).
+        const isFresh = currentTitle && currentTitle !== previousTitle;
+        if (isFresh || attempts >= maxAttempts) {
+          if (!isFresh && attempts >= maxAttempts) {
+            warn("Metadata may be stale — title did not change after",
+                 maxAttempts, "polls. Previous:", previousTitle,
+                 "Current:", currentTitle);
+          }
           resolve(metadata);
         } else {
           setTimeout(poll, interval);
@@ -510,13 +530,19 @@
       return;
     }
 
-    // Avoid re-checking the same video (e.g. duplicate mutation events).
-    // Use the ?v= video ID when available; fall back to the element src.
-    const checkKey = videoId || videoEl.src || videoEl.currentSrc;
-    if (!checkKey || checkKey === lastCheckedVideoId) return;
-    lastCheckedVideoId = checkKey;
+    // Only evaluate on watch pages where we have a real video ID.
+    // Without a ?v= parameter (e.g. home page, search), the watch-page
+    // metadata DOM may still contain STALE info from the previous video,
+    // which would contaminate the AI evaluation and cache the wrong
+    // result under a blob-URL key.  Thumbnails on non-watch pages are
+    // handled separately by processThumbCard / scanThumbnails.
+    if (!videoId) return;
 
-    log("Checking video:", checkKey);
+    // Avoid re-checking the same video (e.g. duplicate mutation events).
+    if (videoId === lastCheckedVideoId) return;
+    lastCheckedVideoId = videoId;
+
+    log("Checking video:", videoId);
 
     // Instantly pause the video so nothing plays until we get a verdict.
     videoEl.pause();
@@ -524,14 +550,18 @@
     // Show the analyzing overlay on top of the player.
     showAnalyzingOverlay(videoEl);
 
-    // Poll for metadata instead of using a fixed timeout.
-    waitForMetadata().then((metadata) => {
+    // Poll for metadata, passing the previous video's title so we can
+    // detect stale DOM content during SPA navigation.
+    waitForMetadata(lastCheckedTitle).then((metadata) => {
+      // Track this video's title so the NEXT navigation can detect staleness.
+      lastCheckedTitle = metadata.title || "";
+
       log("Metadata collected:", { title: metadata.title, description: metadata.description?.substring(0, 100) });
       chrome.runtime.sendMessage(
         {
           type: "CHECK_VIDEO",
           payload: {
-            videoId: checkKey,
+            videoId: videoId,
             url: window.location.href,
             ...metadata,
           },
@@ -665,9 +695,21 @@
     // for the new page.
     lastCheckedVideoId = null;
 
-    const video = document.querySelector("video");
-    if (video) {
-      onVideoFound(video);
+    // Only evaluate the main player on watch pages.  On non-watch pages
+    // (home, search, channel), there is no main video to evaluate and
+    // the watch-page metadata DOM may contain stale data from the
+    // previous video.  Thumbnails on those pages are handled by
+    // scanThumbnails / processThumbCard below.
+    if (getVideoId()) {
+      const video = document.querySelector("video");
+      if (video) {
+        onVideoFound(video);
+      }
+    } else {
+      // Navigated away from a watch page — remove any lingering overlay
+      // and reset the title tracker so stale metadata can't leak.
+      removeOverlay();
+      lastCheckedTitle = "";
     }
 
     // YouTube rebuilds cards on SPA navigation, wiping our DOM elements.
