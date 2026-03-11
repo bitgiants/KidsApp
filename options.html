@@ -266,6 +266,25 @@
       <p class="status" id="categoryStatus"></p>
     </div>
 
+    <!-- AI Prompt -->
+    <div class="card">
+      <h2>AI Prompt</h2>
+      <p class="hint">
+        Customize the system prompt sent to the AI when evaluating videos.
+        Use <code>{{BLOCKED_CATEGORIES}}</code> as a placeholder — it will be replaced with
+        your blocked-category list at runtime.
+      </p>
+      <div class="field-group">
+        <label for="customPrompt">System Prompt</label>
+        <textarea id="customPrompt" rows="14" style="width:100%;font-size:0.85rem;font-family:inherit;padding:0.6rem 0.75rem;border:1px solid #ccc;border-radius:6px;resize:vertical;line-height:1.5;outline:none;" placeholder="Loading default prompt..."></textarea>
+      </div>
+      <div class="btn-row">
+        <button class="btn-save" id="savePromptBtn">Save Prompt</button>
+        <button class="btn-outline" id="resetPromptBtn">Reset to Default</button>
+      </div>
+      <p class="status" id="promptStatus"></p>
+    </div>
+
     <!-- Channel whitelist -->
     <div class="card">
       <h2>Whitelisted Channels</h2>

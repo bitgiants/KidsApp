@@ -44,6 +44,12 @@ const selectAllCats = document.getElementById("selectAllCats");
 const deselectAllCats = document.getElementById("deselectAllCats");
 const categoryStatus = document.getElementById("categoryStatus");
 
+// AI Prompt
+const customPromptEl = document.getElementById("customPrompt");
+const savePromptBtn = document.getElementById("savePromptBtn");
+const resetPromptBtn = document.getElementById("resetPromptBtn");
+const promptStatus = document.getElementById("promptStatus");
+
 // Whitelist
 const whitelistInput = document.getElementById("whitelistInput");
 const addWhitelistBtn = document.getElementById("addWhitelistBtn");
@@ -157,6 +163,9 @@ function loadAllSettings() {
       // Categories
       loadCategories(data.blockedCategories);
 
+      // AI Prompt
+      loadPrompt();
+
       // Lists
       whitelist = data.whitelist || [];
       blacklist = data.blacklist || [];
@@ -259,6 +268,39 @@ deselectAllCats.addEventListener("click", () => {
   });
 });
 
+// ─── AI Prompt ──────────────────────────────────────────────────────
+
+let defaultPrompt = "";
+
+function loadPrompt() {
+  // Fetch the default prompt from background so we always stay in sync.
+  chrome.runtime.sendMessage({ type: "GET_DEFAULT_PROMPT" }, (res) => {
+    if (res?.prompt) defaultPrompt = res.prompt;
+    // Load any custom prompt from storage.
+    chrome.storage.local.get("customPrompt", (data) => {
+      customPromptEl.value = data.customPrompt || defaultPrompt;
+    });
+  });
+}
+
+savePromptBtn.addEventListener("click", () => {
+  const val = customPromptEl.value.trim();
+  if (!val) {
+    showStatus(promptStatus, "Prompt cannot be empty.", "error");
+    return;
+  }
+  chrome.storage.local.set({ customPrompt: val }, () => {
+    showStatus(promptStatus, "Custom prompt saved.", "success");
+  });
+});
+
+resetPromptBtn.addEventListener("click", () => {
+  customPromptEl.value = defaultPrompt;
+  chrome.storage.local.remove("customPrompt", () => {
+    showStatus(promptStatus, "Prompt reset to default.", "info");
+  });
+});
+
 // ─── List management (whitelist + blacklist) ─────────────────────────
 
 function renderList(container, list, listName) {
@@ -324,7 +366,7 @@ blacklistInput.addEventListener("keydown", (e) => {
 
 exportBtn.addEventListener("click", () => {
   chrome.storage.local.get(
-    ["blockedCategories", "whitelist", "blacklist"],
+    ["blockedCategories", "whitelist", "blacklist", "customPrompt"],
     (data) => {
       const payload = {
         _format: "ytkg-settings-v1",
@@ -333,6 +375,7 @@ exportBtn.addEventListener("click", () => {
         whitelist: data.whitelist || [],
         blacklist: data.blacklist || [],
       };
+      if (data.customPrompt) payload.customPrompt = data.customPrompt;
       const blob = new Blob([JSON.stringify(payload, null, 2)], {
         type: "application/json",
       });
@@ -374,11 +417,15 @@ importFile.addEventListener("change", (e) => {
         toSave.blacklist = data.blacklist;
         blacklist = data.blacklist;
       }
+      if (data.customPrompt) {
+        toSave.customPrompt = data.customPrompt;
+      }
 
       chrome.storage.local.set(toSave, () => {
         renderList(whitelistItems, whitelist, "whitelist");
         renderList(blacklistItems, blacklist, "blacklist");
         loadCategories(toSave.blockedCategories);
+        loadPrompt();
         showStatus(ieStatus, "Settings imported successfully.", "success");
       });
     } catch (err) {
