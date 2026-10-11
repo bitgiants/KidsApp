@@ -11,7 +11,7 @@
   "use strict";
 
   // ─── Logging ──────────────────────────────────────────────────────
-  const LOG_PREFIX = "[YT Kids Guard]";
+  const LOG_PREFIX = "[Kids Guard]";
   function log(...args) { console.log(LOG_PREFIX, ...args); }
   function warn(...args) { console.warn(LOG_PREFIX, ...args); }
   function error(...args) { console.error(LOG_PREFIX, ...args); }

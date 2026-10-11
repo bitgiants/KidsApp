@@ -1,8 +1,8 @@
-# CLAUDE.md — KidsApp (YouTube Kids Guard)
+# CLAUDE.md — KidsApp (Kids Guard for YouTube)
 
 ## Project Overview
 
-**YouTube Kids Guard** is a Manifest V3 Chrome extension (org: **bitgiants**) that acts as an
+**Kids Guard for YouTube** is a Manifest V3 Chrome extension (org: **bitgiants**) that acts as an
 AI-powered parental content filter for youtube.com. It pauses every video, sends the title /
 channel / description / transcript to the parent's chosen LLM provider, and only lets the
 video play on an `ALLOW` verdict. Thumbnails on browse pages get the same treatment
@@ -21,10 +21,11 @@ KidsApp/
 ├── options.html / .js     # Settings page (PIN-locked): providers/keys, model, categories,
 │                          #   prompt, age range, transcript toggle, lists, import/export
 ├── popup.html / .js       # Toolbar popup: on/off toggle (PIN required to turn off)
-├── icons/                 # Extension icons
+├── icons/                 # Extension icons (16/48/128 PNG, rendered from assets/icon.svg)
+├── assets/                # Icon source SVG + Chrome Web Store listing art (not shipped in the zip)
 ├── scripts/
 │   ├── validate-setup.js  # `npm run setup` sanity checks
-│   └── package.js         # `npm run package` → dist/youtube-kids-guard.zip (no deps)
+│   └── package.js         # `npm run package` → dist/kids-guard-for-youtube.zip (no deps)
 ├── tests/                 # Jest unit tests (background.js pure logic)
 └── CLAUDE.md
 ```
@@ -37,7 +38,7 @@ KidsApp/
 | Validate setup | `npm run setup` |
 | Run tests | `npm test` (Jest, `tests/**/*.test.js`) |
 | Lint / format | not configured yet — keep to the existing style (2-space, double quotes, semicolons) |
-| Package for Chrome | `npm run package` → `dist/youtube-kids-guard.zip` |
+| Package for Chrome | `npm run package` → `dist/kids-guard-for-youtube.zip` |
 | Load in Chrome | `chrome://extensions` → Developer mode → Load unpacked → repo root |
 
 Node ≥ 16 (Node 22 in CI/cloud sessions). There is no build step; the extension files are

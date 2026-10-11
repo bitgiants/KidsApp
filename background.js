@@ -6,7 +6,7 @@
 // BEFORE making any AI call.
 
 // ─── Logging ─────────────────────────────────────────────────────────
-const LOG_PREFIX = "[YT Kids Guard]";
+const LOG_PREFIX = "[Kids Guard]";
 function log(...args) { console.log(LOG_PREFIX, ...args); }
 function warn(...args) { console.warn(LOG_PREFIX, ...args); }
 function error(...args) { console.error(LOG_PREFIX, ...args); }
@@ -87,7 +87,7 @@ function buildSystemPrompt(blockedCategories, customPromptTemplate, ageRange) {
 
 const OPENROUTER_HEADERS = {
   "HTTP-Referer": "https://github.com/bitgiants/KidsApp",
-  "X-Title": "YouTube Kids Guard",
+  "X-Title": "Kids Guard for YouTube",
 };
 
 const PROVIDERS = {

@@ -17,7 +17,7 @@ function check(label, pass, hint) {
   }
 }
 
-console.log("\n  YouTube Kids Guard — setup validation\n");
+console.log("\n  Kids Guard for YouTube — setup validation\n");
 
 // 1. Required extension files
 const requiredFiles = [

@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4caf50"/>
+      <stop offset="1" stop-color="#1b5e20"/>
+    </linearGradient>
+  </defs>
+  <!-- shield, ~96px tall inside the 128 canvas (store guideline: 16px transparent padding) -->
+  <path d="M64 12 L108 26 V62 C108 88 90 106 64 116 C38 106 20 88 20 62 V26 Z"
+        fill="url(#g)" stroke="#0f3d13" stroke-width="3" stroke-linejoin="round"/>
+  <!-- subtle inner highlight -->
+  <path d="M64 20 L100 31.5 V62 C100 83 85 98 64 107 C43 98 28 83 28 62 V31.5 Z"
+        fill="none" stroke="#ffffff" stroke-opacity="0.18" stroke-width="2"/>
+  <!-- play triangle -->
+  <path d="M51 42 L89 63 L51 84 Z" fill="#ffffff" stroke="#ffffff" stroke-width="2" stroke-linejoin="round"/>
+</svg>
