@@ -16,6 +16,36 @@
   function warn(...args) { console.warn(LOG_PREFIX, ...args); }
   function error(...args) { console.error(LOG_PREFIX, ...args); }
 
+  // ─── Block enforcement ────────────────────────────────────────────
+  // Pausing once is not enough: YouTube autoplays, resumes on click /
+  // space / scroll, and Shorts start the moment they are visible.  While
+  // an "analyzing" or "blocked" overlay is up we re-pause the guarded
+  // <video> on every play attempt.
+  let enforcedVideoEl = null;
+
+  function onEnforcedPlay(event) {
+    const video = event.currentTarget;
+    if (video === enforcedVideoEl && !video.paused) video.pause();
+  }
+
+  function enforceBlock(videoEl) {
+    if (!videoEl) return;
+    if (enforcedVideoEl !== videoEl) {
+      releaseBlock();
+      enforcedVideoEl = videoEl;
+      videoEl.addEventListener("play", onEnforcedPlay);
+      videoEl.addEventListener("playing", onEnforcedPlay);
+    }
+    if (!videoEl.paused) videoEl.pause();
+  }
+
+  function releaseBlock() {
+    if (!enforcedVideoEl) return;
+    enforcedVideoEl.removeEventListener("play", onEnforcedPlay);
+    enforcedVideoEl.removeEventListener("playing", onEnforcedPlay);
+    enforcedVideoEl = null;
+  }
+
   // ─── Enabled state ────────────────────────────────────────────────
   // The guard can be toggled on/off via the popup.  When disabled, all
   // filtering stops and existing overlays/shields are removed.
@@ -46,6 +76,7 @@
     // Remove video overlays (using literals to avoid forward-ref issues).
     document.getElementById("ytkg-overlay")?.remove();
     document.getElementById("ytkg-channel-block")?.remove();
+    releaseBlock();
 
     // Remove the injected stylesheet so all CSS shields disappear.
     document.getElementById("ytkg-styles")?.remove();
@@ -264,12 +295,17 @@
       }
 
       .ytkg-thumb-blocked-overlay span {
-        color: #ff6b6b;
-        font-size: 11px;
-        font-weight: 500;
+        color: #fff;
+        font-size: 13px;
+        font-weight: 600;
         font-family: 'YouTube Noto', Roboto, Arial, sans-serif;
         text-align: center;
-        padding: 4px 8px;
+        line-height: 1.35;
+        padding: 6px 10px;
+        margin: 0 8px;
+        background: rgba(180, 30, 30, 0.92);
+        border-radius: 6px;
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
       }
 
       /* ── Full-page channel block overlay ── */
@@ -344,9 +380,9 @@
     document.getElementById("ytkg-channel-back-btn").addEventListener("click", () => {
       goBackOrHome();
     });
-    // Also pause any playing video.
+    // Also keep any playing video paused.
     const video = document.querySelector("video");
-    if (video) video.pause();
+    if (video) enforceBlock(video);
   }
 
   /**
@@ -400,6 +436,10 @@
 
   // Track the last video ID we analysed so we don't re-check the same video.
   let lastCheckedVideoId = null;
+
+  // Verdict for lastCheckedVideoId once it has arrived, so we can re-apply
+  // it if YouTube swaps in a fresh <video> element for the same video.
+  let lastVerdict = null; // { videoId, blocked, reason } | null
 
   // Track the title from the last evaluated video so waitForMetadata can
   // detect stale DOM content during SPA navigation.
@@ -463,17 +503,25 @@
 
   const OVERLAY_ID = "ytkg-overlay";
 
+  // The <video> the current overlay belongs to.
+  let activeVideoEl = null;
+
   /**
-   * Find the nearest positioned container around the <video> element.
-   * YouTube's player container (#movie_player) is position: relative, so our
-   * absolutely-positioned overlay will sit right on top of it.
+   * Find the element our overlay should cover.  We want the whole player
+   * (video + controls): #movie_player on watch pages, #shorts-player on
+   * the Shorts page — both carry the .html5-video-player class.  The
+   * video's direct parent (.html5-video-container) is often zero-height,
+   * which would squash the overlay into a thin strip, so as a last resort
+   * walk up to the first ancestor with a real height.
    */
   function getPlayerContainer(videoEl) {
-    // Prefer the well-known #movie_player wrapper.
-    const moviePlayer = videoEl.closest("#movie_player");
-    if (moviePlayer) return moviePlayer;
-    // Fall back to the direct parent.
-    return videoEl.parentElement;
+    const player = videoEl.closest("#movie_player, #shorts-player, .html5-video-player");
+    if (player) return player;
+    let el = videoEl.parentElement;
+    while (el && el !== document.body && el.offsetHeight < 100) {
+      el = el.parentElement;
+    }
+    return el || videoEl.parentElement;
   }
 
   /**
@@ -502,6 +550,10 @@
     `;
 
     container.appendChild(overlay);
+
+    // Nothing may play until we have a verdict.
+    activeVideoEl = videoEl;
+    enforceBlock(videoEl);
   }
 
   /**
@@ -512,9 +564,8 @@
     const overlay = document.getElementById(OVERLAY_ID);
     if (!overlay) return;
 
-    // Ensure the video stays paused.
-    const video = document.querySelector("video");
-    if (video) video.pause();
+    // Ensure the video stays paused — and stays that way.
+    enforceBlock(activeVideoEl || document.querySelector("video"));
 
     overlay.className = "ytkg-overlay ytkg-overlay--blocked";
     overlay.innerHTML = `
@@ -533,6 +584,8 @@
    */
   function removeOverlay() {
     document.getElementById(OVERLAY_ID)?.remove();
+    releaseBlock();
+    activeVideoEl = null;
   }
 
   function escapeHtml(str) {
@@ -626,9 +679,25 @@
     // handled separately by processThumbCard / scanThumbnails.
     if (!videoId) return;
 
-    // Avoid re-checking the same video (e.g. duplicate mutation events).
-    if (videoId === lastCheckedVideoId) return;
+    // Same video again (duplicate mutation, or YouTube re-mounted the
+    // player).  Don't re-check — but if this is a NEW <video> element,
+    // re-apply the current state so it can't play unguarded.
+    if (videoId === lastCheckedVideoId) {
+      if (videoEl !== activeVideoEl) {
+        if (lastVerdict && lastVerdict.videoId === videoId) {
+          if (lastVerdict.blocked) {
+            showAnalyzingOverlay(videoEl);
+            showBlockedOverlay(lastVerdict.reason);
+          }
+        } else {
+          // Verdict still pending — keep the new element paused too.
+          showAnalyzingOverlay(videoEl);
+        }
+      }
+      return;
+    }
     lastCheckedVideoId = videoId;
+    lastVerdict = null;
 
     log("Checking video:", videoId);
 
@@ -655,21 +724,31 @@
           },
         },
         (response) => {
+          // The user may have moved on while we waited.  A late verdict
+          // for the OLD video must never touch the overlay of the new one.
+          if (lastCheckedVideoId !== videoId) {
+            log("Ignoring late verdict for", videoId);
+            return;
+          }
+
           if (chrome.runtime.lastError) {
             error("Messaging error:", chrome.runtime.lastError.message);
-            showBlockedOverlay(
-              "Safety check unavailable — video blocked as a precaution."
-            );
+            const reason = "Safety check unavailable — video blocked as a precaution.";
+            lastVerdict = { videoId, blocked: true, reason };
+            showBlockedOverlay(reason);
             return;
           }
 
           if (response?.blocked) {
             log("BLOCKED:", response.reason);
+            lastVerdict = { videoId, blocked: true, reason: response.reason };
             showBlockedOverlay(response.reason);
           } else {
             log("ALLOWED:", response?.reason);
+            lastVerdict = { videoId, blocked: false, reason: response?.reason || "" };
+            const target = activeVideoEl || videoEl;
             removeOverlay();
-            videoEl.play();
+            target.play();
           }
         }
       );
@@ -775,20 +854,25 @@
   // inside the SPA.  The <video> element is often reused without a src
   // attribute change, so we must re-check whenever navigation occurs.
 
-  window.addEventListener("yt-navigate-finish", () => {
+  let lastHandledHref = window.location.href;
+
+  function handleNavigation() {
+    lastHandledHref = window.location.href;
+
     // Check if we navigated to a blacklisted channel page.
     checkChannelPage();
 
     // Reset the dedup key so the same <video> element is re-evaluated
     // for the new page.
     lastCheckedVideoId = null;
+    lastVerdict = null;
 
-    // Only evaluate the main player on watch pages.  On non-watch pages
-    // (home, search, channel), there is no main video to evaluate and
+    // Only evaluate the main player on watch pages and Shorts.  On other
+    // pages (home, search, channel) there is no main video to evaluate and
     // the watch-page metadata DOM may contain stale data from the
     // previous video.  Thumbnails on those pages are handled by
     // scanThumbnails / processThumbCard below.
-    if (getVideoId()) {
+    if (getVideoId() || isYouTubeShorts()) {
       const video = document.querySelector("video");
       if (video) {
         onVideoFound(video);
@@ -812,7 +896,19 @@
     scanThumbnails();
     setTimeout(scanThumbnails, 500);
     setTimeout(scanThumbnails, 1500);
-  });
+  }
+
+  window.addEventListener("yt-navigate-finish", handleNavigation);
+
+  // Fallback for navigations that don't fire yt-navigate-finish — scrolling
+  // between Shorts swaps the URL in place, and only the first Short was
+  // being blocked.
+  setInterval(() => {
+    if (window.location.href !== lastHandledHref) {
+      log("URL changed without yt-navigate-finish:", window.location.href);
+      handleNavigation();
+    }
+  }, 500);
 
   // ─── Thumbnail scanning ─────────────────────────────────────────────
   // On browse / search / home pages, find video thumbnail cards, extract
