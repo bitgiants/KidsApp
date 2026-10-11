@@ -17,7 +17,7 @@ function check(label, pass, hint) {
   }
 }
 
-console.log("\n  YouTube Kids Guard — setup validation\n");
+console.log("\n  Kids Guard for YouTube — setup validation\n");
 
 // 1. Required extension files
 const requiredFiles = [
@@ -55,6 +55,14 @@ try {
   check(
     "content_scripts defined",
     Array.isArray(manifest.content_scripts) && manifest.content_scripts.length > 0
+  );
+  // The Chrome Web Store refuses uploads whose manifest description is
+  // longer than 132 characters.
+  const descLen = (manifest.description || "").length;
+  check(
+    `manifest description is ${descLen}/132 chars (Web Store limit)`,
+    descLen > 0 && descLen <= 132,
+    "Shorten manifest.json → description to 132 characters or fewer."
   );
 } catch (e) {
   check("manifest.json is valid JSON", false, e.message);

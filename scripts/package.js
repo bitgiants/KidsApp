@@ -7,7 +7,7 @@ const { execSync } = require("child_process");
 
 const ROOT = path.resolve(__dirname, "..");
 const OUT_DIR = path.join(ROOT, "dist");
-const ZIP_NAME = "youtube-kids-guard.zip";
+const ZIP_NAME = "kids-guard-for-youtube.zip";
 
 // Files and directories to include in the zip.
 const INCLUDE = [
