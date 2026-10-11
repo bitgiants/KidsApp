@@ -169,7 +169,7 @@
 
     <!-- Header card -->
     <div class="card">
-      <span class="version">v2.1</span>
+      <span class="version">v2.3</span>
       <h1>YouTube Kids Guard</h1>
       <p class="subtitle">Parental controls for safe YouTube browsing.</p>
     </div>
@@ -234,7 +234,7 @@
           </div>
           <label for="anthropicKey">API Key</label>
           <input type="password" id="anthropicKey" placeholder="sk-ant-..." autocomplete="off">
-          <p class="hint">Default model: claude-haiku-4-5-20251001</p>
+          <p class="hint">Default model: claude-haiku-5-5</p>
         </div>
         <div class="provider-card" data-provider="openrouter">
           <div class="provider-header">
@@ -301,6 +301,14 @@
     <div class="card">
       <h2>Analysis Options</h2>
       <p class="hint">Control what data the AI uses when evaluating videos.</p>
+      <div class="field-group">
+        <label for="ageRange">Child age range</label>
+        <input type="text" id="ageRange" placeholder="e.g. 8–14" maxlength="20">
+        <p class="hint">
+          Tells the AI who it is filtering for; younger ranges make it stricter.
+          Substituted wherever the prompt contains <code>{{AGE_RANGE}}</code>.
+        </p>
+      </div>
       <label class="category-item" id="transcriptToggle" style="width:fit-content; margin-bottom:0.5rem;">
         <input type="checkbox" id="useTranscript" checked>
         Use video transcript (subtitles)

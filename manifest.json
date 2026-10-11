@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "YouTube Kids Guard",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "AI-powered parental content filter for YouTube. PIN-protected settings, category blocking, channel whitelist/blacklist, multi-provider AI.",
   "permissions": [
     "storage",
@@ -27,8 +27,12 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://www.youtube.com/*"],
-      "js": ["content.js"],
+      "matches": [
+        "https://www.youtube.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
       "run_at": "document_idle"
     }
   ],
