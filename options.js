@@ -55,6 +55,7 @@ const promptStatus = document.getElementById("promptStatus");
 
 // Analysis options
 const useTranscriptCb = document.getElementById("useTranscript");
+const ageRangeInput = document.getElementById("ageRange");
 const saveAnalysisBtn = document.getElementById("saveAnalysisBtn");
 const analysisStatus = document.getElementById("analysisStatus");
 
@@ -255,7 +256,7 @@ saveProviderBtn.addEventListener("click", () => {
 const PROVIDER_DEFAULTS = {
   gemini: "gemini-2.0-flash",
   openai: "gpt-4o-mini",
-  anthropic: "claude-haiku-4-5-20251001",
+  anthropic: "claude-haiku-5-5",
   openrouter: "google/gemini-2.0-flash-001",
 };
 
@@ -468,21 +469,33 @@ resetPromptBtn.addEventListener("click", () => {
 
 // ─── Analysis options ───────────────────────────────────────────────
 
+const AGE_RANGE_MAX_LEN = 20;
+
 function loadAnalysisOptions() {
-  chrome.storage.local.get("useTranscript", (data) => {
+  chrome.storage.local.get(["useTranscript", "ageRange"], (data) => {
     useTranscriptCb.checked = data.useTranscript !== false; // default ON
+    ageRangeInput.value = data.ageRange || "";
   });
 }
 
 saveAnalysisBtn.addEventListener("click", () => {
-  chrome.storage.local.set({ useTranscript: useTranscriptCb.checked }, () => {
-    showStatus(analysisStatus,
-      useTranscriptCb.checked
-        ? "Transcript analysis enabled."
-        : "Transcript analysis disabled — using title/channel/description only.",
-      "success"
-    );
-  });
+  const ageRange = ageRangeInput.value.trim().slice(0, AGE_RANGE_MAX_LEN);
+  if (ageRange && !/^[0-9][0-9\s–-]*[0-9]$/.test(ageRange)) {
+    showStatus(analysisStatus, "Age range should look like \"8–14\" or \"6-9\".", "error");
+    return;
+  }
+  chrome.storage.local.set(
+    { useTranscript: useTranscriptCb.checked, ageRange },
+    () => {
+      showStatus(analysisStatus,
+        (useTranscriptCb.checked
+          ? "Transcript analysis enabled."
+          : "Transcript analysis disabled — using title/channel/description only.") +
+        (ageRange ? ` Age range: ${ageRange}.` : " Age range: default (8–14)."),
+        "success"
+      );
+    }
+  );
 });
 
 // ─── List management (whitelist + blacklist) ─────────────────────────
@@ -550,7 +563,7 @@ blacklistInput.addEventListener("keydown", (e) => {
 
 exportBtn.addEventListener("click", () => {
   chrome.storage.local.get(
-    ["blockedCategories", "whitelist", "blacklist", "customPrompt", "useTranscript"],
+    ["blockedCategories", "whitelist", "blacklist", "customPrompt", "useTranscript", "ageRange"],
     (data) => {
       const payload = {
         _format: "ytkg-settings-v1",
@@ -561,6 +574,7 @@ exportBtn.addEventListener("click", () => {
       };
       if (data.customPrompt) payload.customPrompt = data.customPrompt;
       if (data.useTranscript !== undefined) payload.useTranscript = data.useTranscript;
+      if (data.ageRange) payload.ageRange = data.ageRange;
       const blob = new Blob([JSON.stringify(payload, null, 2)], {
         type: "application/json",
       });
@@ -606,7 +620,10 @@ importFile.addEventListener("change", (e) => {
         toSave.customPrompt = data.customPrompt;
       }
       if (data.useTranscript !== undefined) {
-        toSave.useTranscript = data.useTranscript;
+        toSave.useTranscript = Boolean(data.useTranscript);
+      }
+      if (typeof data.ageRange === "string") {
+        toSave.ageRange = data.ageRange.trim().slice(0, AGE_RANGE_MAX_LEN);
       }
 
       chrome.storage.local.set(toSave, () => {

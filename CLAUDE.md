@@ -1,54 +1,89 @@
-# CLAUDE.md — KidsApp
+# CLAUDE.md — KidsApp (YouTube Kids Guard)
 
 ## Project Overview
 
-KidsApp is a project under the **bitgiants** organization. This repository is in its initial setup phase.
+**YouTube Kids Guard** is a Manifest V3 Chrome extension (org: **bitgiants**) that acts as an
+AI-powered parental content filter for youtube.com. It pauses every video, sends the title /
+channel / description / transcript to the parent's chosen LLM provider, and only lets the
+video play on an `ALLOW` verdict. Thumbnails on browse pages get the same treatment
+(badge + hover/click shield). Settings are PIN-locked.
 
-> **Note:** This file should be updated as the project evolves — add framework-specific commands, architecture details, and conventions as they are established.
+Supported providers (each with its own API key): **Google Gemini**, **OpenAI**, **Anthropic**,
+**OpenRouter**. The model list is fetched live from each provider's API.
 
 ## Repository Structure
 
 ```
 KidsApp/
-├── CLAUDE.md          # This file — guidance for AI assistants
-└── (project files TBD)
+├── manifest.json          # MV3 manifest (permissions, host_permissions, entry points)
+├── background.js          # Service worker: provider calls, cache, PIN, whitelist/blacklist
+├── content.js             # Runs on youtube.com: pause/overlay player, scan thumbnails, SPA nav
+├── options.html / .js     # Settings page (PIN-locked): providers/keys, model, categories,
+│                          #   prompt, age range, transcript toggle, lists, import/export
+├── popup.html / .js       # Toolbar popup: on/off toggle (PIN required to turn off)
+├── icons/                 # Extension icons
+├── scripts/
+│   ├── validate-setup.js  # `npm run setup` sanity checks
+│   └── package.js         # `npm run package` → dist/youtube-kids-guard.zip (no deps)
+├── tests/                 # Jest unit tests (background.js pure logic)
+└── CLAUDE.md
 ```
-
-## Getting Started
-
-This is a new repository. Once the project scaffolding is added, update this section with:
-
-- Language/framework and version requirements
-- Installation steps (e.g., `npm install`, `pip install -r requirements.txt`)
-- Environment variable setup
-- Database or service dependencies
 
 ## Common Commands
 
-<!-- Update these as the project takes shape -->
-
 | Task | Command |
 |------|---------|
-| Install dependencies | TBD |
-| Run dev server | TBD |
-| Run tests | TBD |
-| Lint / format | TBD |
-| Build for production | TBD |
+| Install dependencies | `npm install` |
+| Validate setup | `npm run setup` |
+| Run tests | `npm test` (Jest, `tests/**/*.test.js`) |
+| Lint / format | not configured yet — keep to the existing style (2-space, double quotes, semicolons) |
+| Package for Chrome | `npm run package` → `dist/youtube-kids-guard.zip` |
+| Load in Chrome | `chrome://extensions` → Developer mode → Load unpacked → repo root |
+
+Node ≥ 16 (Node 22 in CI/cloud sessions). There is no build step; the extension files are
+loaded as-is.
+
+## Architecture Notes
+
+- **Message bus**: `content.js` / `options.js` / `popup.js` talk to `background.js` via
+  `chrome.runtime.sendMessage`. Message types: `CHECK_VIDEO`, `CHECK_CHANNEL`, `VERIFY_PIN`,
+  `SET_PIN`, `CLEAR_PIN`, `FETCH_MODELS`, `GET_CATEGORIES`, `GET_DEFAULT_PROMPT`.
+- **Evaluation pipeline** (`evaluateVideo` in background.js): validate videoId → guard-enabled
+  check → persistent cache → in-flight dedup → whitelist/blacklist → concurrency-limited
+  transcript fetch + provider call → cache. Any error **fails closed** (video blocked).
+- **Cache** is an in-memory Map hydrated from / persisted to `chrome.storage.local`
+  (`evalCache`), because MV3 service workers are killed after ~30s idle.
+- **Prompt**: `DEFAULT_SYSTEM_PROMPT` with `{{BLOCKED_CATEGORIES}}` and `{{AGE_RANGE}}`
+  placeholders; parents can edit it in options. Video metadata is wrapped in
+  `<video_metadata>` and declared untrusted — never paste uploader text into the system prompt.
+- **Anthropic specifics**: current Claude models reject `temperature`, return a `thinking`
+  block before the `text` block, and may return `stop_reason: "refusal"` (treated as BLOCK).
+  Keep `queryAnthropic` in sync with the API when changing models.
+- **PIN** is stored as a SHA-256 hash; verification is rate-limited in the service worker.
+- **content.js** must survive YouTube's SPA navigation (`yt-navigate-finish`) and must not
+  read stale watch-page metadata for a new video — see `waitForMetadata`.
 
 ## Development Workflow
 
-1. Create a feature branch from `main`
-2. Make changes and ensure tests pass before committing
+1. Create a feature branch from `master` (the default branch on GitHub should be `master`)
+2. Make changes and ensure `npm test` and `npm run setup` pass before committing
 3. Write clear, descriptive commit messages
-4. Push and open a pull request for review
+4. Push and open a pull request; prefer **Squash and merge** to keep history clean
 
 ## Code Conventions
 
-- **Safety first** — This is a kids' application. All content, inputs, and outputs must be age-appropriate and safe. Validate and sanitize user inputs rigorously.
-- **Accessibility** — Follow WCAG guidelines; ensure the app is usable for children of varying abilities.
-- **Privacy** — Comply with COPPA (Children's Online Privacy Protection Act) and equivalent regulations. Never collect personal data from children without proper consent flows.
-- **Keep it simple** — Write clean, readable code. Prefer clarity over cleverness.
-- **Test thoroughly** — Every feature should have corresponding tests. Edge cases matter especially in apps used by children.
+- **Safety first** — This is a kids' application. Fail closed: if a check cannot complete,
+  block. Treat all YouTube-sourced text (titles, descriptions, transcripts, channel names) as
+  untrusted input — sanitise, length-cap, and escape before rendering (`escapeHtml`) or
+  prompting.
+- **Accessibility** — Follow WCAG guidelines; overlays must be readable and keyboard-operable.
+- **Privacy** — Comply with COPPA. The extension sends only public video metadata to the
+  configured AI provider and stores settings locally; never collect or transmit data about
+  the child.
+- **Keep it simple** — Plain JS, no bundler, no runtime dependencies. Do not add npm
+  dependencies without a strong reason.
+- **Test thoroughly** — Pure logic lives in `background.js` and is unit-tested; keep DOM
+  code in `content.js` thin so logic can be extracted and tested.
 
 ## AI Assistant Guidelines
 

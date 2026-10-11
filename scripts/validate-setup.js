@@ -26,6 +26,8 @@ const requiredFiles = [
   "content.js",
   "options.html",
   "options.js",
+  "popup.html",
+  "popup.js",
   "icons/icon16.png",
   "icons/icon48.png",
   "icons/icon128.png",
@@ -89,7 +91,8 @@ if (ok) {
   console.log("  1. Open chrome://extensions");
   console.log("  2. Enable Developer mode");
   console.log('  3. Click "Load unpacked" and select this folder');
-  console.log("  4. Right-click the extension icon → Options → enter your Gemini API key\n");
+  console.log("  4. Right-click the extension icon → Options → pick an AI provider");
+  console.log("     (Gemini, OpenAI, Anthropic or OpenRouter) and enter its API key\n");
 } else {
   console.log("  Some checks failed. Fix the issues above and re-run: npm run setup\n");
   process.exit(1);

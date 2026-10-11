@@ -342,11 +342,25 @@
     `;
     document.body.appendChild(overlay);
     document.getElementById("ytkg-channel-back-btn").addEventListener("click", () => {
-      history.back();
+      goBackOrHome();
     });
     // Also pause any playing video.
     const video = document.querySelector("video");
     if (video) video.pause();
+  }
+
+  /**
+   * Leave the blocked page.  If the tab has no history (the video was
+   * opened in a new tab or via a direct link), history.back() is a no-op,
+   * so fall back to the YouTube home page instead of leaving the child
+   * stuck on a red screen.
+   */
+  function goBackOrHome() {
+    if (window.history.length > 1) {
+      window.history.back();
+    } else {
+      window.location.assign("https://www.youtube.com/");
+    }
   }
 
   function removeChannelBlockOverlay() {
@@ -434,10 +448,13 @@
     const handleMatch = href.match(/^\/@([^/?]+)/);
     if (handleMatch) channelHandle = handleMatch[1];
 
-    const description =
+    // Cap the description here too — the background sanitises again, but
+    // there is no point shipping a 10 KB description across the message bus.
+    const description = (
       document.querySelector(
         "ytd-text-inline-expander .ytd-text-inline-expander"
-      )?.textContent?.trim() || "";
+      )?.textContent?.trim() || ""
+    ).slice(0, 2000);
 
     return { title, channel, channelHandle, description };
   }
@@ -507,7 +524,7 @@
     `;
 
     document.getElementById("ytkg-back-btn").addEventListener("click", () => {
-      history.back();
+      goBackOrHome();
     });
   }
 
