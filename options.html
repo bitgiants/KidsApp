@@ -256,7 +256,7 @@
           <button type="button" class="btn-outline" id="refreshModelsBtn" title="Fetch available models from API">&#8635;</button>
         </div>
         <input type="text" id="modelCustom" placeholder="Enter custom model ID" style="display:none;margin-top:0.5rem;">
-        <p class="hint" id="modelHint">Save your API key, then click &#8635; to load available models.</p>
+        <p class="hint" id="modelHint">Enter an API key above (no need to save first), then click &#8635; to load available models.</p>
       </div>
 
       <div class="btn-row">
@@ -319,6 +319,7 @@
       </p>
       <div class="btn-row">
         <button class="btn-save" id="saveAnalysisBtn">Save</button>
+        <button class="btn-outline" id="clearCacheBtn" title="Forget every cached allow/block decision so each video is checked again">Clear decision cache</button>
       </div>
       <p class="status" id="analysisStatus"></p>
     </div>

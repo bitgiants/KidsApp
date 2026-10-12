@@ -454,9 +454,6 @@
   // it if YouTube swaps in a fresh <video> element for the same video.
   let lastVerdict = null; // { videoId, blocked, reason } | null
 
-  // Track the title from the last evaluated video so waitForMetadata can
-  // detect stale DOM content during SPA navigation.
-  let lastCheckedTitle = "";
 
   // Keep a reference to the attribute observer attached to the current <video>
   // so we can disconnect it before attaching a new one.
@@ -479,12 +476,13 @@
    * empty if called too early — the background script can still use the URL.
    */
   function getVideoMetadata() {
-    const title =
+    const domTitle =
       document.querySelector(
         "yt-formatted-string.style-scope.ytd-watch-metadata"
       )?.textContent?.trim() ||
       document.querySelector("h1.ytd-watch-metadata")?.textContent?.trim() ||
-      document.title;
+      "";
+    const title = domTitle || document.title;
 
     // Channel display name (e.g. "Innuendo Studios").
     const channelLink = document.querySelector(
@@ -509,7 +507,27 @@
       )?.textContent?.trim() || ""
     ).slice(0, 2000);
 
-    return { title, channel, channelHandle, description };
+    return { title, domTitle, channel, channelHandle, description };
+  }
+
+  /**
+   * Which video the watch layout is currently showing.  YouTube stamps
+   * <ytd-watch-flexy video-id="…"> when it hands a new video's data to
+   * the page, so it is the most reliable signal that the title /
+   * description nodes belong to the video in the URL rather than the
+   * previous one (the old layout stays in the DOM, hidden, after you
+   * leave a watch page).
+   */
+  function getRenderedVideoId() {
+    return document.querySelector("ytd-watch-flexy")?.getAttribute("video-id") || null;
+  }
+
+  function isMetadataFresh(videoId, metadata) {
+    const rendered = getRenderedVideoId();
+    if (rendered) return rendered === videoId;
+    // Fallback when the marker is missing: YouTube updates document.title
+    // with the new video's title, so the DOM title should match it.
+    return !!metadata.domTitle && document.title.startsWith(metadata.domTitle);
   }
 
   // ─── Overlay management ──────────────────────────────────────────────
@@ -670,39 +688,34 @@
   // ─── Metadata polling ─────────────────────────────────────────────────
 
   /**
-   * Wait for YouTube to populate the video title in the DOM.
-   * Polls every 300 ms up to a maximum number of attempts, then resolves
-   * with whatever metadata is available (the URL alone is still useful).
+   * Wait until the watch-page DOM demonstrably belongs to `videoId`.
    *
-   * IMPORTANT: During SPA navigation, the previous video's metadata may
-   * still be in the DOM when this function starts.  We compare against
-   * `previousTitle` and wait for the title to CHANGE before accepting it.
-   * This prevents caching a result under Video B's ID with Video A's
-   * metadata, which caused cross-contamination of block reasons.
+   * During SPA navigation the previous video's title/description stay in
+   * the DOM for a while (and remain there, hidden, after visiting the
+   * home page).  We only accept metadata once YouTube's own video-id
+   * marker matches the URL AND the fields have been stable for two
+   * consecutive polls.  If that never happens we resolve with
+   * `metadataFresh: false` and the caller must NOT send the scraped
+   * text — the background will fetch the authoritative metadata instead.
    */
-  function waitForMetadata(previousTitle = "", maxAttempts = 15, interval = 300) {
+  function waitForMetadata(videoId, maxAttempts = 20, interval = 200) {
     return new Promise((resolve) => {
       let attempts = 0;
+      let previousKey = null;
+      let stable = 0;
       function poll() {
         attempts++;
         const metadata = getVideoMetadata();
-        const titleEl = document.querySelector(
-          "yt-formatted-string.style-scope.ytd-watch-metadata"
-        ) || document.querySelector("h1.ytd-watch-metadata");
-        const currentTitle = titleEl?.textContent?.trim() || "";
+        const key = [metadata.domTitle, metadata.channel, metadata.description].join("\u0000");
+        stable = key === previousKey ? stable + 1 : 0;
+        previousKey = key;
 
-        // Metadata is "ready" when we have a title that:
-        //  1. Is non-empty (not just the generic document.title fallback)
-        //  2. Differs from the previous video's title (not stale DOM)
-        // OR we've exhausted our polling attempts (send best-effort data).
-        const isFresh = currentTitle && currentTitle !== previousTitle;
-        if (isFresh || attempts >= maxAttempts) {
-          if (!isFresh && attempts >= maxAttempts) {
-            warn("Metadata may be stale — title did not change after",
-                 maxAttempts, "polls. Previous:", previousTitle,
-                 "Current:", currentTitle);
-          }
-          resolve(metadata);
+        if (metadata.domTitle && isMetadataFresh(videoId, metadata) && stable >= 1) {
+          resolve({ ...metadata, metadataFresh: true });
+        } else if (attempts >= maxAttempts) {
+          warn("Could not confirm the page metadata belongs to", videoId,
+               "(rendered:", getRenderedVideoId(), ") — not sending scraped text.");
+          resolve({ ...metadata, metadataFresh: false });
         } else {
           setTimeout(poll, interval);
         }
@@ -776,22 +789,22 @@
     // Show the analyzing overlay on top of the player.
     showAnalyzingOverlay(videoEl);
 
-    // Poll for metadata, passing the previous video's title so we can
-    // detect stale DOM content during SPA navigation.
-    waitForMetadata(lastCheckedTitle).then((metadata) => {
-      // Track this video's title so the NEXT navigation can detect staleness.
-      lastCheckedTitle = metadata.title || "";
+    // Wait until the DOM provably belongs to this video.  If that cannot
+    // be confirmed, send the ID alone — the background fetches the
+    // authoritative title/description for the exact video ID.
+    waitForMetadata(videoId).then((metadata) => {
+      const { domTitle, metadataFresh, ...fields } = metadata;
+      const payload = metadataFresh
+        ? { videoId, url: window.location.href, source: "watch", metadataFresh: true, ...fields }
+        : { videoId, url: window.location.href, source: "watch", metadataFresh: false };
 
-      log("Metadata collected:", { title: metadata.title, description: metadata.description?.substring(0, 100) });
+      log("Metadata collected:", {
+        fresh: metadataFresh,
+        title: payload.title,
+        description: payload.description?.substring(0, 100),
+      });
       chrome.runtime.sendMessage(
-        {
-          type: "CHECK_VIDEO",
-          payload: {
-            videoId: videoId,
-            url: window.location.href,
-            ...metadata,
-          },
-        },
+        { type: "CHECK_VIDEO", payload },
         (response) => {
           // The user may have moved on while we waited.  A late verdict
           // for the OLD video must never touch the overlay of the new one.
@@ -955,10 +968,8 @@
         onVideoFound(video);
       }
     } else {
-      // Navigated away from a watch page — remove any lingering overlay
-      // and reset the title tracker so stale metadata can't leak.
+      // Navigated away from a watch page — remove any lingering overlay.
       removeOverlay();
-      lastCheckedTitle = "";
     }
 
     // YouTube rebuilds cards on SPA navigation, wiping our DOM elements.
@@ -1203,6 +1214,7 @@
           channel,
           channelHandle,
           description: "",
+          source: "thumb",
         },
       },
       (response) => {
