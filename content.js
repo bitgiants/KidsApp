@@ -16,34 +16,47 @@
   function warn(...args) { console.warn(LOG_PREFIX, ...args); }
   function error(...args) { console.error(LOG_PREFIX, ...args); }
 
+  const EXT_VERSION = (() => {
+    try { return chrome.runtime.getManifest().version; } catch { return "?"; }
+  })();
+  log(`content script v${EXT_VERSION} loaded:`, window.location.href);
+
   // ─── Block enforcement ────────────────────────────────────────────
   // Pausing once is not enough: YouTube autoplays, resumes on click /
   // space / scroll, and Shorts start the moment they are visible.  While
   // an "analyzing" or "blocked" overlay is up we re-pause the guarded
   // <video> on every play attempt.
-  let enforcedVideoEl = null;
+  //
+  // A Set rather than a single slot: the Shorts page keeps several
+  // <video> elements alive at once (previous / active / preloaded next)
+  // and autoplays whichever scrolls into view, so every one of them must
+  // stay paused — not just the last one we happened to see.
+  const enforcedVideos = new Set();
 
   function onEnforcedPlay(event) {
     const video = event.currentTarget;
-    if (video === enforcedVideoEl && !video.paused) video.pause();
+    if (enforcedVideos.has(video) && !video.paused) video.pause();
   }
 
   function enforceBlock(videoEl) {
     if (!videoEl) return;
-    if (enforcedVideoEl !== videoEl) {
-      releaseBlock();
-      enforcedVideoEl = videoEl;
+    if (!enforcedVideos.has(videoEl)) {
+      enforcedVideos.add(videoEl);
       videoEl.addEventListener("play", onEnforcedPlay);
       videoEl.addEventListener("playing", onEnforcedPlay);
     }
     if (!videoEl.paused) videoEl.pause();
   }
 
-  function releaseBlock() {
-    if (!enforcedVideoEl) return;
-    enforcedVideoEl.removeEventListener("play", onEnforcedPlay);
-    enforcedVideoEl.removeEventListener("playing", onEnforcedPlay);
-    enforcedVideoEl = null;
+  function releaseBlock(videoEl) {
+    if (!videoEl || !enforcedVideos.has(videoEl)) return;
+    videoEl.removeEventListener("play", onEnforcedPlay);
+    videoEl.removeEventListener("playing", onEnforcedPlay);
+    enforcedVideos.delete(videoEl);
+  }
+
+  function releaseAllBlocks() {
+    for (const videoEl of Array.from(enforcedVideos)) releaseBlock(videoEl);
   }
 
   // ─── Enabled state ────────────────────────────────────────────────
@@ -74,9 +87,9 @@
    */
   function disableGuard() {
     // Remove video overlays (using literals to avoid forward-ref issues).
-    document.getElementById("ytkg-overlay")?.remove();
+    document.querySelectorAll(".ytkg-overlay").forEach((el) => el.remove());
     document.getElementById("ytkg-channel-block")?.remove();
-    releaseBlock();
+    releaseAllBlocks();
 
     // Remove the injected stylesheet so all CSS shields disappear.
     document.getElementById("ytkg-styles")?.remove();
@@ -567,14 +580,18 @@
     // Ensure the video stays paused — and stays that way.
     enforceBlock(activeVideoEl || document.querySelector("video"));
 
+    renderBlockedOverlay(overlay, reason);
+  }
+
+  /** Fill an overlay element with the blocked state (shared with Shorts). */
+  function renderBlockedOverlay(overlay, reason) {
     overlay.className = "ytkg-overlay ytkg-overlay--blocked";
     overlay.innerHTML = `
       <p class="ytkg-overlay__title">Video Blocked</p>
       <p class="ytkg-overlay__reason">${escapeHtml(reason)}</p>
-      <button class="ytkg-overlay__back-btn" id="ytkg-back-btn">Go Back</button>
+      <button class="ytkg-overlay__back-btn" type="button">Go Back</button>
     `;
-
-    document.getElementById("ytkg-back-btn").addEventListener("click", () => {
+    overlay.querySelector(".ytkg-overlay__back-btn").addEventListener("click", () => {
       goBackOrHome();
     });
   }
@@ -583,8 +600,8 @@
    * Remove the overlay entirely (called on ALLOW or when a new check starts).
    */
   function removeOverlay() {
-    document.getElementById(OVERLAY_ID)?.remove();
-    releaseBlock();
+    document.querySelectorAll(".ytkg-overlay").forEach((el) => el.remove());
+    releaseAllBlocks();
     activeVideoEl = null;
   }
 
@@ -592,6 +609,60 @@
     const div = document.createElement("div");
     div.appendChild(document.createTextNode(str));
     return div.innerHTML;
+  }
+
+  // ─── Shorts blocking ──────────────────────────────────────────────
+  // The Shorts page keeps several players alive (previous / active /
+  // preloaded next) and autoplays whichever is in view.  Every <video>
+  // on the page therefore gets its own persistent overlay + enforcement;
+  // nothing here depends on which one YouTube considers "active".
+
+  const SHORTS_REASON = "YouTube Shorts are not allowed.";
+
+  // <video> elements that are NOT a main player: inline thumbnail previews
+  // and the floating hover-preview player.  (Mirrors THUMB_CARD_SELECTORS,
+  // which is declared further down and must not be referenced at load.)
+  const NON_PLAYER_VIDEO_SELECTORS = [
+    "ytd-rich-item-renderer",
+    "ytd-video-renderer",
+    "ytd-compact-video-renderer",
+    "ytd-grid-video-renderer",
+    "ytm-shorts-lockup-view-model-v2",
+    "ytd-reel-item-renderer",
+    "ytd-video-preview",
+  ].join(", ");
+
+  function isPlayerVideo(videoEl) {
+    return !videoEl.closest(NON_PLAYER_VIDEO_SELECTORS);
+  }
+
+  function blockShortsVideo(videoEl) {
+    enforceBlock(videoEl);
+    const container = getPlayerContainer(videoEl);
+    if (!container) return;
+    if (getComputedStyle(container).position === "static") {
+      container.style.position = "relative";
+    }
+    let overlay = container.querySelector(":scope > .ytkg-overlay");
+    if (!overlay) {
+      overlay = document.createElement("div");
+      overlay.dataset.ytkgShorts = "1";
+      container.appendChild(overlay);
+    }
+    if (!overlay.classList.contains("ytkg-overlay--blocked")) {
+      renderBlockedOverlay(overlay, SHORTS_REASON);
+    }
+  }
+
+  /** Block every main-player <video> on the current Shorts page. */
+  function blockAllShorts() {
+    let count = 0;
+    document.querySelectorAll("video").forEach((videoEl) => {
+      if (!isPlayerVideo(videoEl)) return;
+      blockShortsVideo(videoEl);
+      count++;
+    });
+    return count;
   }
 
   // ─── Video handling ──────────────────────────────────────────────────
@@ -664,10 +735,8 @@
     // so we block every time the video src changes on a /shorts/ page.
     // No dedup — always re-block to catch scrolling between Shorts.
     if (isYouTubeShorts()) {
-      log("Shorts detected — blocking:", window.location.href);
-      videoEl.pause();
-      showAnalyzingOverlay(videoEl);
-      showBlockedOverlay("YouTube Shorts are not allowed.");
+      const n = blockAllShorts();
+      log(`Shorts detected — blocked ${n} player(s):`, window.location.href);
       return;
     }
 
@@ -844,7 +913,8 @@
 
   // ─── Handle a <video> that already exists on initial page load ───────
 
-  const existingVideo = document.querySelector("video");
+  const existingVideo =
+    document.querySelector("#movie_player video") || document.querySelector("video");
   if (existingVideo) {
     onVideoFound(existingVideo);
   }
@@ -872,8 +942,15 @@
     // the watch-page metadata DOM may contain stale data from the
     // previous video.  Thumbnails on those pages are handled by
     // scanThumbnails / processThumbCard below.
-    if (getVideoId() || isYouTubeShorts()) {
-      const video = document.querySelector("video");
+    if (isYouTubeShorts()) {
+      const n = blockAllShorts();
+      log(`Shorts navigation — blocked ${n} player(s):`, window.location.href);
+    } else if (getVideoId()) {
+      // Prefer the main player's <video>; the first <video> in the DOM
+      // may be an inline preview.
+      const video =
+        document.querySelector("#movie_player video") ||
+        document.querySelector("video");
       if (video) {
         onVideoFound(video);
       }
@@ -904,9 +981,14 @@
   // between Shorts swaps the URL in place, and only the first Short was
   // being blocked.
   setInterval(() => {
+    if (!guardEnabled) return;
     if (window.location.href !== lastHandledHref) {
       log("URL changed without yt-navigate-finish:", window.location.href);
       handleNavigation();
+    } else if (isYouTubeShorts()) {
+      // Safety net: whatever YouTube does to its players between
+      // navigations, every <video> on a Shorts page stays blocked.
+      blockAllShorts();
     }
   }, 500);
 
