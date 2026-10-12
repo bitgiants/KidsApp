@@ -58,6 +58,7 @@ const useTranscriptCb = document.getElementById("useTranscript");
 const ageRangeInput = document.getElementById("ageRange");
 const saveAnalysisBtn = document.getElementById("saveAnalysisBtn");
 const analysisStatus = document.getElementById("analysisStatus");
+const clearCacheBtn = document.getElementById("clearCacheBtn");
 
 // Whitelist
 const whitelistInput = document.getElementById("whitelistInput");
@@ -215,6 +216,17 @@ function updateProviderCards() {
 }
 providerSelect.addEventListener("change", updateProviderCards);
 
+// Typing a key into a provider's field makes that provider the active one —
+// no separate dropdown step, and the ↻ button then uses the typed key.
+for (const [prov, input] of Object.entries(keyInputs)) {
+  input.addEventListener("input", () => {
+    if (input.value.trim() && providerSelect.value !== prov) {
+      providerSelect.value = prov;
+      providerSelect.dispatchEvent(new Event("change"));
+    }
+  });
+}
+
 saveProviderBtn.addEventListener("click", () => {
   const provider = providerSelect.value;
   const toSave = { aiProvider: provider };
@@ -294,7 +306,7 @@ function resetModelSelect(currentModel) {
 
   modelSelect.value = currentModel || "";
   modelCustom.style.display = "none";
-  modelHint.textContent = `Save your API key, then click \u21BB to load available models.`;
+  modelHint.textContent = `Enter an API key above (no need to save first), then click \u21BB to load available models.`;
 }
 
 // Show/hide custom input when "Custom model…" is selected.
@@ -320,7 +332,7 @@ refreshModelsBtn.addEventListener("click", () => {
     chrome.storage.local.get(sk, (data) => {
       const storedKey = data[sk];
       if (!storedKey) {
-        modelHint.textContent = "Enter and save an API key first.";
+        modelHint.textContent = "Enter an API key for this provider first.";
         return;
       }
       doFetchModels(provider, storedKey);
@@ -477,6 +489,18 @@ function loadAnalysisOptions() {
     ageRangeInput.value = data.ageRange || "";
   });
 }
+
+clearCacheBtn.addEventListener("click", () => {
+  clearCacheBtn.disabled = true;
+  chrome.runtime.sendMessage({ type: "CLEAR_CACHE" }, (res) => {
+    clearCacheBtn.disabled = false;
+    if (res?.ok) {
+      showStatus(analysisStatus, "Decision cache cleared — every video will be checked again.", "success");
+    } else {
+      showStatus(analysisStatus, "Could not clear the cache: " + (res?.error || "unknown error"), "error");
+    }
+  });
+});
 
 saveAnalysisBtn.addEventListener("click", () => {
   const ageRange = ageRangeInput.value.trim().slice(0, AGE_RANGE_MAX_LEN);

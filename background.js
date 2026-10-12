@@ -183,6 +183,14 @@ function schedulePersistCache() {
   }, CACHE_PERSIST_DEBOUNCE_MS);
 }
 
+async function clearCache() {
+  cache.clear();
+  // Mark as hydrated-empty so an in-flight hydration can't repopulate it.
+  cacheHydration = Promise.resolve();
+  if (hasStorage()) await chrome.storage.local.remove(CACHE_STORAGE_KEY);
+  log("Decision cache cleared.");
+}
+
 function cacheGet(key) {
   const entry = cache.get(key);
   if (!entry) return undefined;
@@ -403,24 +411,42 @@ function decodeEntities(str) {
     .replace(/&#(\d+);/g, (_m, code) => String.fromCharCode(Number(code)));
 }
 
-/**
- * Fetch the auto-generated or uploaded transcript for a YouTube video.
- *
- * How it works:
- * 1. Fetch the raw HTML of the video's watch page.
- * 2. Extract the captionTracks JSON array via regex (avoids DOM parsing).
- * 3. Prefer English captions; fall back to the first available track.
- * 4. Fetch the XML subtitle file and strip tags to get plain text.
- * 5. Truncate to ~TRANSCRIPT_MAX_CHARS for prompt efficiency.
- *
- * Returns null if no captions are available or on any error.
- */
-async function getFastTranscript(videoId) {
-  try {
-    const response = await fetch(`https://www.youtube.com/watch?v=${videoId}`);
-    if (!response.ok) return null;
-    const html = await response.text();
+/** Turn a JSON-escaped string fragment back into text. */
+function unescapeJsonString(raw) {
+  try { return JSON.parse(`"${raw}"`); } catch { return raw; }
+}
 
+/**
+ * Parse the authoritative video metadata out of a watch-page HTML blob.
+ * `ytInitialPlayerResponse.videoDetails` is keyed by the exact video ID,
+ * so — unlike anything scraped from the live DOM — it can never belong to
+ * the previous video.  Returns null if the page is not for `videoId`.
+ */
+function parseWatchPageInfo(html, videoId) {
+  if (typeof html !== "string") return null;
+  const idMatch = /"videoDetails":\{"videoId":"([^"]+)"/.exec(html);
+  if (!idMatch || idMatch[1] !== videoId) return null;
+  const slice = html.slice(idMatch.index, idMatch.index + 30000);
+  const grab = (key) => {
+    const m = new RegExp(`"${key}":"((?:[^"\\\\]|\\\\.)*)"`).exec(slice);
+    return m ? unescapeJsonString(m[1]) : "";
+  };
+  const handleMatch = /"ownerProfileUrl":"[^"]*?\\?\/@([^"\\/?]+)"/.exec(html);
+  return {
+    title: grab("title"),
+    author: grab("author"),
+    description: grab("shortDescription"),
+    channelHandle: handleMatch ? unescapeJsonString(handleMatch[1]) : "",
+  };
+}
+
+/**
+ * Pull the first ~TRANSCRIPT_MAX_CHARS of spoken text from the caption
+ * track referenced in the watch-page HTML.  Returns null if there are no
+ * captions or on any error.
+ */
+async function extractTranscript(html, videoId) {
+  try {
     // Extract the full captionTracks array so we can pick the best language.
     const tracksRegex = /"captionTracks":(\[.*?\])/;
     const tracksMatch = html.match(tracksRegex);
@@ -472,7 +498,25 @@ async function getFastTranscript(videoId) {
     log(`Transcript fetched for ${videoId}: ${text.length} chars, ${lines.length} lines`);
     return text;
   } catch (err) {
-    error("Transcript fetch failed for", videoId, err.message);
+    error("Transcript extraction failed for", videoId, err.message);
+    return null;
+  }
+}
+
+/**
+ * Fetch the watch page once and derive both the authoritative metadata
+ * and (optionally) the transcript from it.  Returns null on fetch failure.
+ */
+async function fetchWatchPageInfo(videoId, wantTranscript) {
+  try {
+    const response = await fetch(`https://www.youtube.com/watch?v=${videoId}`);
+    if (!response.ok) return null;
+    const html = await response.text();
+    const info = parseWatchPageInfo(html, videoId) || {};
+    info.transcript = wantTranscript ? await extractTranscript(html, videoId) : null;
+    return info;
+  } catch (err) {
+    error("Watch page fetch failed for", videoId, err.message);
     return null;
   }
 }
@@ -718,47 +762,72 @@ async function evaluateVideo(payload) {
   return task;
 }
 
-async function evaluateUncached(payload) {
-  const { videoId, channel, channelHandle } = payload;
-  const settings = await getSettings();
-
-  // 1. Whitelist check — skip AI entirely.
-  //    Match on display name, @handle, or video ID.
+/** Whitelist / blacklist lookup. Returns a verdict or null. */
+function checkLists({ videoId, channel, channelHandle }, settings) {
   if (isChannelInList(channel, settings.whitelist) ||
       isChannelInList(channelHandle, settings.whitelist) ||
       isVideoInList(videoId, settings.whitelist)) {
     log("WHITELIST match for", channelHandle || channel || videoId);
-    const result = { blocked: false, reason: "Whitelisted channel." };
-    cacheSet(videoId, result);
-    return result;
+    return { blocked: false, reason: "Whitelisted channel." };
   }
-
-  // 2. Blacklist check — skip AI entirely.
   if (isChannelInList(channel, settings.blacklist) ||
       isChannelInList(channelHandle, settings.blacklist) ||
       isVideoInList(videoId, settings.blacklist)) {
     log("BLACKLIST match for", channelHandle || channel || videoId);
-    const result = { blocked: true, reason: "Blacklisted channel." };
-    cacheSet(videoId, result);
-    return result;
+    return { blocked: true, reason: "Blacklisted channel." };
+  }
+  return null;
+}
+
+async function evaluateUncached(payload) {
+  const { videoId } = payload;
+  const settings = await getSettings();
+
+  // 1 + 2. Whitelist / blacklist on the scraped channel — only when the
+  //        content script confirmed the text belongs to this video.
+  if (payload.metadataFresh !== false) {
+    const listed = checkLists(payload, settings);
+    if (listed) { cacheSet(videoId, listed); return listed; }
   }
 
-  // 3 + 4. Network-bound work (transcript + AI call) goes through the
-  //        concurrency limiter so a burst of thumbnails can't trip rate limits.
+  // 3 + 4. Network-bound work goes through the concurrency limiter so a
+  //        burst of thumbnails can't trip rate limits.
   return withConcurrencyLimit(async () => {
     // Another request may have finished while this one waited in the queue.
     const fresh = cacheGet(videoId);
     if (fresh) return fresh;
 
-    // 3. Optionally fetch transcript for richer context.
-    if (settings.useTranscript) {
-      try {
-        const transcript = await getFastTranscript(videoId);
-        if (transcript) payload.transcript = transcript;
-      } catch (err) {
-        warn("Transcript fetch skipped:", err.message);
-      }
+    // 3. Authoritative metadata (+ transcript) from the watch page itself.
+    //    The page is keyed by video ID, so it can never describe the
+    //    previous video the way scraped DOM text can.  Always for
+    //    watch-page checks and whenever the scraped text is unconfirmed;
+    //    otherwise only when transcripts are on (which needs the page anyway).
+    const needPage =
+      settings.useTranscript ||
+      payload.source === "watch" ||
+      payload.metadataFresh === false;
+    const pageInfo = needPage
+      ? await fetchWatchPageInfo(videoId, settings.useTranscript)
+      : null;
+
+    if (pageInfo && pageInfo.title) {
+      payload.title = pageInfo.title;
+      if (pageInfo.author) payload.channel = pageInfo.author;
+      if (pageInfo.channelHandle) payload.channelHandle = pageInfo.channelHandle;
+      payload.description = pageInfo.description || "";
+      // Lists get a second look with the authoritative channel.
+      const listed = checkLists(payload, settings);
+      if (listed) { cacheSet(videoId, listed); return listed; }
+    } else if (payload.metadataFresh === false) {
+      // Nothing trustworthy to judge — block, but do NOT cache a verdict
+      // that was never actually made.
+      warn("No trustworthy metadata for", videoId, "— blocking without caching.");
+      return {
+        blocked: true,
+        reason: "Could not verify this video's details — blocked as a precaution. Reload the page to retry.",
+      };
     }
+    if (pageInfo?.transcript) payload.transcript = pageInfo.transcript;
 
     // 4. AI evaluation with dynamic system prompt.
     const systemPrompt = buildSystemPrompt(
@@ -990,6 +1059,13 @@ if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
       return true;
     }
 
+    if (message.type === "CLEAR_CACHE") {
+      clearCache()
+        .then(() => sendResponse({ ok: true }))
+        .catch((err) => sendResponse({ ok: false, error: err.message }));
+      return true;
+    }
+
     if (message.type === "FETCH_MODELS") {
       const { provider, apiKey } = message;
       fetchModels(provider, apiKey)
@@ -1015,6 +1091,14 @@ if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
   });
 }
 
+// Verdict logic changes between versions — never carry old verdicts over.
+if (typeof chrome !== "undefined" && chrome.runtime?.onInstalled) {
+  chrome.runtime.onInstalled.addListener((details) => {
+    log("onInstalled:", details.reason);
+    clearCache().catch((err) => warn("Cache clear on install failed:", err.message));
+  });
+}
+
 // ─── Exports for testing ─────────────────────────────────────────────
 
 if (typeof module !== "undefined" && module.exports) {
@@ -1027,6 +1111,8 @@ if (typeof module !== "undefined" && module.exports) {
     buildSystemPrompt,
     sanitizeField,
     parseAIResponse,
+    parseWatchPageInfo,
+    unescapeJsonString,
     decodeEntities,
     normalizeChannel,
     isChannelInList,

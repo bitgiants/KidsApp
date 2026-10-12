@@ -6,6 +6,7 @@ const {
   buildSystemPrompt,
   sanitizeField,
   parseAIResponse,
+  parseWatchPageInfo,
   normalizeChannel,
   isChannelInList,
   isValidVideoId,
@@ -394,5 +395,35 @@ describe("fetchWithRetry", () => {
     const res = await fetchWithRetry("https://example.test", {});
     expect(res.status).toBe(401);
     expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ─── parseWatchPageInfo ──────────────────────────────────────────────
+
+describe("parseWatchPageInfo", () => {
+  const html =
+    'junk "videoDetails":{"videoId":"abc123def45","title":"Man Builds a \\"Castle\\" \\u0026 more",' +
+    '"lengthSeconds":"2341","keywords":["castle","plasticine"],"channelId":"UC1","isOwnerViewing":false,' +
+    '"shortDescription":"Line one\\nLine two","isCrawlable":true,' +
+    '"thumbnail":{"thumbnails":[{"url":"https:\\/\\/i.ytimg.com\\/x.jpg","width":1}]},' +
+    '"author":"Quantum Makers","isPrivate":false} more ' +
+    '"ownerProfileUrl":"http:\\/\\/www.youtube.com\\/@AlekseyKarpushkin" tail';
+
+  test("extracts title, author, description and handle for the matching video ID", () => {
+    expect(parseWatchPageInfo(html, "abc123def45")).toEqual({
+      title: 'Man Builds a "Castle" & more',
+      author: "Quantum Makers",
+      description: "Line one\nLine two",
+      channelHandle: "AlekseyKarpushkin",
+    });
+  });
+
+  test("returns null when the page is for a different video", () => {
+    expect(parseWatchPageInfo(html, "zzzzzzzzzzz")).toBeNull();
+  });
+
+  test("returns null for pages without videoDetails or non-strings", () => {
+    expect(parseWatchPageInfo("<html>consent wall</html>", "abc123def45")).toBeNull();
+    expect(parseWatchPageInfo(undefined, "abc123def45")).toBeNull();
   });
 });
