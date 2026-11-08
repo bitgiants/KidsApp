@@ -518,7 +518,7 @@ let lastDiagnostics = null;
 
 function formatDiagnostics(d) {
   const lines = [
-    `Kids Guard v${d.version} — provider: ${d.provider || "(none yet)"} / model: ${d.model || "(default)"}` +
+    `Kids Guard v${d.version} — provider: ${d.provider || "(none yet)"} / model: ${d.model || `(default: ${d.defaultModel || "?"})`}` +
       (d.fallbackModels && d.fallbackModels.length ? ` / fallbacks: ${d.fallbackModels.join(", ")}` : ""),
     `cache: ${d.cacheSize} decisions · in flight: ${d.inFlight} · queued: ${d.queued}`,
     "",

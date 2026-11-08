@@ -784,6 +784,9 @@
   chrome.storage.local.get(["recommendations", "whitelist"], (data) => {
     recommendations = Array.isArray(data.recommendations) ? data.recommendations : [];
     whitelistEntries = Array.isArray(data.whitelist) ? data.whitelist : [];
+    // A verdict can beat this read (cached decisions are fast): give any
+    // block screen that is already up its panel now.
+    refreshAlternativePanels();
   });
   chrome.storage.onChanged.addListener((changes) => {
     if (changes.recommendations) {
@@ -792,7 +795,22 @@
     if (changes.whitelist) {
       whitelistEntries = Array.isArray(changes.whitelist.newValue) ? changes.whitelist.newValue : [];
     }
+    if (changes.recommendations || changes.whitelist) refreshAlternativePanels();
   });
+
+  /** Insert or replace the alternatives panel on every block screen currently shown. */
+  function refreshAlternativePanels() {
+    const html = renderAlternativesHtml();
+    const screens = [
+      ...document.querySelectorAll(".ytkg-overlay--blocked"),
+      document.getElementById(SHORTS_BLOCK_ID),
+      document.getElementById(CHANNEL_BLOCK_ID),
+    ].filter(Boolean);
+    for (const screen of screens) {
+      screen.querySelector(":scope > .ytkg-alts")?.remove();
+      if (html) screen.insertAdjacentHTML("beforeend", html);
+    }
+  }
 
   function normalizeChannelName(name) {
     return String(name ?? "").toLowerCase().replace(/^@/, "").trim();
@@ -844,6 +862,15 @@
       return { url: `https://www.youtube.com/watch?v=${videoId}`, label: label || "Recommended video", videoId };
     }
 
+    if (url.pathname === "/results") {
+      const q = (url.searchParams.get("search_query") || "").trim();
+      if (!q || q.length > 100) return null;
+      return {
+        url: `https://www.youtube.com/results?search_query=${encodeURIComponent(q)}`,
+        label: label || q, videoId: null, kind: "search",
+      };
+    }
+
     if (url.pathname === "/playlist") {
       const list = url.searchParams.get("list") || "";
       if (!/^[A-Za-z0-9_-]{10,80}$/.test(list)) return null;
@@ -869,22 +896,28 @@
     };
     recommendations.forEach(push);
     if (out.length < MAX_ALTERNATIVES) {
-      // Whitelisted @handles link cleanly; plain display names can't.
-      whitelistEntries.forEach((e) => {
-        const name = String((typeof e === "string" ? e : e && e.channel) || "").trim();
-        if (name.startsWith("@")) push(name);
-      });
+      // Whitelisted @handles link straight to the channel.  Plain display
+      // names can't be turned into a channel URL, so they become a search
+      // for that channel — still a parent-approved place to go.
+      const entries = whitelistEntries
+        .map((e) => String((typeof e === "string" ? e : e && e.channel) || "").trim())
+        .filter(Boolean);
+      entries.filter((n) => n.startsWith("@")).forEach(push);
+      entries
+        .filter((n) => !n.startsWith("@") && /^[\p{L}\p{N} .,'&_-]{2,60}$/u.test(n))
+        .forEach((n) => push({ url: `https://www.youtube.com/results?search_query=${encodeURIComponent(n)}`, label: n }));
     }
     return out;
   }
 
   function renderAlternativesHtml() {
     const alts = getAlternatives();
+    log(`Block screen alternatives: ${alts.length} (recommendations: ${recommendations.length}, whitelist: ${whitelistEntries.length})`);
     if (alts.length === 0) return "";
     const items = alts.map((alt) => {
       const thumb = alt.videoId
         ? `<img class="ytkg-alt__thumb" src="https://i.ytimg.com/vi/${alt.videoId}/mqdefault.jpg" alt="">`
-        : `<span class="ytkg-alt__thumb ytkg-alt__thumb--channel">&#9654;</span>`;
+        : `<span class="ytkg-alt__thumb ytkg-alt__thumb--channel">${alt.kind === "search" ? "&#128269;" : "&#9654;"}</span>`;
       return `<a class="ytkg-alt" href="${escapeHtml(alt.url)}">${thumb}<span class="ytkg-alt__label">${escapeHtml(alt.label)}</span></a>`;
     }).join("");
     return `<div class="ytkg-alts"><p class="ytkg-alts__title">&#10003; Try one of these instead</p><div class="ytkg-alts__grid">${items}</div></div>`;
