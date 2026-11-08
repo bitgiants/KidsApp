@@ -261,6 +261,23 @@
         <p class="hint" id="modelHint">Enter an API key above (no need to save first), then click &#8635; to load available models.</p>
       </div>
 
+      <div class="field-group">
+        <label for="fallback1Select">Fallback models (optional)</label>
+        <p class="hint">
+          If the main model fails — rate limit, outage, unreadable reply — these are tried in order,
+          so a single flaky model never turns into "could not check". Same provider as above;
+          load the list with &#8635; first.
+        </p>
+        <div class="model-row" style="margin-bottom:0.5rem">
+          <select id="fallback1Select"><option value="">(no fallback)</option></select>
+        </div>
+        <input type="text" id="fallback1Custom" placeholder="Custom model ID for fallback 1" style="display:none;margin-bottom:0.5rem;">
+        <div class="model-row">
+          <select id="fallback2Select"><option value="">(no fallback)</option></select>
+        </div>
+        <input type="text" id="fallback2Custom" placeholder="Custom model ID for fallback 2" style="display:none;margin-top:0.5rem;">
+      </div>
+
       <div class="btn-row">
         <button class="btn-save" id="saveProviderBtn">Save Provider Settings</button>
       </div>
@@ -344,22 +361,6 @@
       </div>
     </div>
 
-    <!-- Diagnostics -->
-    <div class="card">
-      <h2>Diagnostics</h2>
-      <p class="hint">
-        When a video "could not be checked", the real reason (provider, status, message) is recorded here.
-        Click <strong>Copy diagnostics</strong> and paste the result when reporting a problem.
-      </p>
-      <div class="btn-row">
-        <button class="btn-outline" id="refreshDiagBtn">Refresh</button>
-        <button class="btn-outline" id="copyDiagBtn">Copy diagnostics</button>
-        <button class="btn-clear" id="clearDiagBtn">Clear</button>
-      </div>
-      <pre id="diagOut" style="margin-top:0.75rem;font-size:0.78rem;line-height:1.45;background:#fafafa;border:1px solid #e8e8e8;border-radius:6px;padding:0.75rem;max-height:280px;overflow:auto;white-space:pre-wrap;word-break:break-word;"></pre>
-      <p class="status" id="diagStatus"></p>
-    </div>
-
     <!-- Recommended alternatives -->
     <div class="card">
       <h2>Recommended Videos &amp; Channels</h2>
@@ -402,6 +403,22 @@
         <input type="file" id="importFile" accept=".json">
       </div>
       <p class="status" id="ieStatus"></p>
+    </div>
+
+    <!-- Diagnostics -->
+    <div class="card">
+      <h2>Diagnostics</h2>
+      <p class="hint">
+        When a video "could not be checked", the real reason (provider, status, message) is recorded here.
+        Click <strong>Copy diagnostics</strong> and paste the result when reporting a problem.
+      </p>
+      <div class="btn-row">
+        <button class="btn-outline" id="refreshDiagBtn">Refresh</button>
+        <button class="btn-outline" id="copyDiagBtn">Copy diagnostics</button>
+        <button class="btn-clear" id="clearDiagBtn">Clear</button>
+      </div>
+      <pre id="diagOut" style="margin-top:0.75rem;font-size:0.78rem;line-height:1.45;background:#fafafa;border:1px solid #e8e8e8;border-radius:6px;padding:0.75rem;max-height:280px;overflow:auto;white-space:pre-wrap;word-break:break-word;"></pre>
+      <p class="status" id="diagStatus"></p>
     </div>
 
   </div>

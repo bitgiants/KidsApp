@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Kids Guard for YouTube",
-  "version": "2.4.2",
+  "version": "2.5.0",
   "description": "AI parental filter for YouTube. Blocks unsafe videos and Shorts using your own AI key. PIN-locked settings and channel lists.",
   "permissions": [
     "storage"
