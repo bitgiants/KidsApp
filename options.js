@@ -65,6 +65,13 @@ const whitelistInput = document.getElementById("whitelistInput");
 const addWhitelistBtn = document.getElementById("addWhitelistBtn");
 const whitelistItems = document.getElementById("whitelistItems");
 
+// Recommended alternatives
+const recInput = document.getElementById("recInput");
+const recLabel = document.getElementById("recLabel");
+const addRecBtn = document.getElementById("addRecBtn");
+const recItems = document.getElementById("recItems");
+const recStatus = document.getElementById("recStatus");
+
 // Blacklist
 const blacklistInput = document.getElementById("blacklistInput");
 const addBlacklistBtn = document.getElementById("addBlacklistBtn");
@@ -88,6 +95,7 @@ const MASKED = "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u20
 // In-memory copies of lists (loaded from storage).
 let whitelist = [];
 let blacklist = [];
+let recommendations = [];
 
 // ─── PIN lock ────────────────────────────────────────────────────────
 
@@ -174,7 +182,7 @@ function loadAllSettings() {
       "aiProvider", "aiModel",
       ...Object.values(storageKeys),
       "blockedCategories",
-      "whitelist", "blacklist",
+      "whitelist", "blacklist", "recommendations",
     ],
     (data) => {
       // Provider
@@ -202,6 +210,8 @@ function loadAllSettings() {
       blacklist = data.blacklist || [];
       renderList(whitelistItems, whitelist, "whitelist");
       renderList(blacklistItems, blacklist, "blacklist");
+      recommendations = Array.isArray(data.recommendations) ? data.recommendations : [];
+      renderRecList();
     }
   );
 }
@@ -583,11 +593,99 @@ blacklistInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") addBlacklistBtn.click();
 });
 
+// ─── Recommended alternatives ───────────────────────────────────────
+
+const YT_HOSTS = new Set(["www.youtube.com", "youtube.com", "m.youtube.com", "youtu.be"]);
+
+/**
+ * Validate and canonicalise a recommendation.  Accepts a video URL,
+ * youtu.be link, playlist URL, channel URL (/@handle, /channel/…, /c/…,
+ * /user/…) or a bare @handle.  Returns { url, label } or null.  Shorts
+ * are never accepted.
+ */
+function normalizeRecommendation(text, label) {
+  const raw = String(text || "").trim();
+  const lbl = String(label || "").trim().slice(0, 80);
+  if (!raw) return null;
+  if (/^@[A-Za-z0-9._-]{3,60}$/.test(raw)) {
+    return { url: `https://www.youtube.com/${raw}`, label: lbl || raw };
+  }
+  let url;
+  try { url = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`); } catch { return null; }
+  if (!YT_HOSTS.has(url.hostname)) return null;
+
+  let videoId = null;
+  if (url.hostname === "youtu.be") videoId = url.pathname.slice(1);
+  else if (url.pathname === "/watch") videoId = url.searchParams.get("v");
+  if (videoId) {
+    if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) return null;
+    return { url: `https://www.youtube.com/watch?v=${videoId}`, label: lbl || "Recommended video" };
+  }
+  if (url.pathname === "/playlist") {
+    const list = url.searchParams.get("list") || "";
+    if (!/^[A-Za-z0-9_-]{10,80}$/.test(list)) return null;
+    return { url: `https://www.youtube.com/playlist?list=${list}`, label: lbl || "Recommended playlist" };
+  }
+  const m = /^\/(@[A-Za-z0-9._-]{3,60}|channel\/[A-Za-z0-9_-]{10,40}|c\/[A-Za-z0-9._-]{1,60}|user\/[A-Za-z0-9._-]{1,60})(?:\/[A-Za-z]*)?\/?$/.exec(url.pathname);
+  if (m) {
+    return { url: `https://www.youtube.com/${m[1]}`, label: lbl || m[1].replace(/^(channel|c|user)\//, "") };
+  }
+  return null;
+}
+
+function renderRecList() {
+  recItems.innerHTML = "";
+  if (recommendations.length === 0) {
+    recItems.innerHTML = `<p class="list-empty">No recommendations yet — whitelisted @channels will be offered instead.</p>`;
+    return;
+  }
+  recommendations.forEach((rec, i) => {
+    const item = document.createElement("div");
+    item.className = "list-item";
+    item.innerHTML = `
+      <span><strong>${escapeHtml(rec.label || "")}</strong>
+        <span style="color:#757575;font-size:0.8rem;margin-left:0.4rem">${escapeHtml(rec.url || "")}</span></span>
+      <button class="remove-btn" title="Remove">&times;</button>
+    `;
+    item.querySelector(".remove-btn").addEventListener("click", () => {
+      recommendations.splice(i, 1);
+      chrome.storage.local.set({ recommendations }, renderRecList);
+    });
+    recItems.appendChild(item);
+  });
+}
+
+addRecBtn.addEventListener("click", () => {
+  const rec = normalizeRecommendation(recInput.value, recLabel.value);
+  if (!rec) {
+    showStatus(recStatus, "Enter a YouTube video, playlist or channel URL, or an @handle (Shorts are not accepted).", "error");
+    return;
+  }
+  if (recommendations.some((r) => r.url === rec.url)) {
+    showStatus(recStatus, "That one is already in the list.", "info");
+    return;
+  }
+  recommendations.push(rec);
+  chrome.storage.local.set({ recommendations }, () => {
+    recInput.value = "";
+    recLabel.value = "";
+    renderRecList();
+    showStatus(recStatus, `Added: ${rec.label}`, "success");
+  });
+});
+
+recInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") addRecBtn.click();
+});
+recLabel.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") addRecBtn.click();
+});
+
 // ─── Import / Export ─────────────────────────────────────────────────
 
 exportBtn.addEventListener("click", () => {
   chrome.storage.local.get(
-    ["blockedCategories", "whitelist", "blacklist", "customPrompt", "useTranscript", "ageRange"],
+    ["blockedCategories", "whitelist", "blacklist", "customPrompt", "useTranscript", "ageRange", "recommendations"],
     (data) => {
       const payload = {
         _format: "ytkg-settings-v1",
@@ -599,6 +697,7 @@ exportBtn.addEventListener("click", () => {
       if (data.customPrompt) payload.customPrompt = data.customPrompt;
       if (data.useTranscript !== undefined) payload.useTranscript = data.useTranscript;
       if (data.ageRange) payload.ageRange = data.ageRange;
+      if (Array.isArray(data.recommendations)) payload.recommendations = data.recommendations;
       const blob = new Blob([JSON.stringify(payload, null, 2)], {
         type: "application/json",
       });
@@ -649,10 +748,18 @@ importFile.addEventListener("change", (e) => {
       if (typeof data.ageRange === "string") {
         toSave.ageRange = data.ageRange.trim().slice(0, AGE_RANGE_MAX_LEN);
       }
+      if (Array.isArray(data.recommendations)) {
+        // Re-validate every entry; never trust a file blindly.
+        recommendations = data.recommendations
+          .map((r) => normalizeRecommendation(r && r.url, r && r.label))
+          .filter(Boolean);
+        toSave.recommendations = recommendations;
+      }
 
       chrome.storage.local.set(toSave, () => {
         renderList(whitelistItems, whitelist, "whitelist");
         renderList(blacklistItems, blacklist, "blacklist");
+        renderRecList();
         loadCategories(toSave.blockedCategories);
         loadPrompt();
         loadAnalysisOptions();
