@@ -65,6 +65,13 @@ const whitelistInput = document.getElementById("whitelistInput");
 const addWhitelistBtn = document.getElementById("addWhitelistBtn");
 const whitelistItems = document.getElementById("whitelistItems");
 
+// Diagnostics
+const refreshDiagBtn = document.getElementById("refreshDiagBtn");
+const copyDiagBtn = document.getElementById("copyDiagBtn");
+const clearDiagBtn = document.getElementById("clearDiagBtn");
+const diagOut = document.getElementById("diagOut");
+const diagStatus = document.getElementById("diagStatus");
+
 // Recommended alternatives
 const recInput = document.getElementById("recInput");
 const recLabel = document.getElementById("recLabel");
@@ -204,6 +211,7 @@ function loadAllSettings() {
 
       // Analysis options
       loadAnalysisOptions();
+      loadDiagnostics();
 
       // Lists
       whitelist = data.whitelist || [];
@@ -500,6 +508,59 @@ function loadAnalysisOptions() {
   });
 }
 
+// ─── Diagnostics ────────────────────────────────────────────────────
+
+let lastDiagnostics = null;
+
+function formatDiagnostics(d) {
+  const lines = [
+    `Kids Guard v${d.version} — provider: ${d.provider || "(none yet)"} / model: ${d.model || "(default)"}`,
+    `cache: ${d.cacheSize} decisions · in flight: ${d.inFlight} · queued: ${d.queued}`,
+    "",
+  ];
+  if (!d.recentFailures.length) {
+    lines.push("No failed checks recorded.");
+  } else {
+    lines.push(`Last ${d.recentFailures.length} failed check(s), newest first:`);
+    for (const f of [...d.recentFailures].reverse()) {
+      lines.push(
+        `${new Date(f.t).toLocaleString()}  [${f.kind}]  ${f.provider || "?"} / ${f.model || "?"}  ` +
+        `video ${f.videoId || "?"} (${f.source || "?"})\n    ${f.message || ""}`
+      );
+    }
+  }
+  return lines.join("\n");
+}
+
+function loadDiagnostics() {
+  chrome.runtime.sendMessage({ type: "GET_DIAGNOSTICS" }, (d) => {
+    if (chrome.runtime.lastError || !d || d.error) {
+      diagOut.textContent = "Background not reachable: " + (chrome.runtime.lastError?.message || d?.error || "unknown");
+      return;
+    }
+    lastDiagnostics = d;
+    diagOut.textContent = formatDiagnostics(d);
+  });
+}
+
+refreshDiagBtn.addEventListener("click", loadDiagnostics);
+
+copyDiagBtn.addEventListener("click", () => {
+  if (!lastDiagnostics) { loadDiagnostics(); return; }
+  const text = JSON.stringify({ exportedAt: new Date().toISOString(), ...lastDiagnostics }, null, 2);
+  navigator.clipboard.writeText(text).then(
+    () => showStatus(diagStatus, "Diagnostics copied to the clipboard — paste them into your report.", "success"),
+    () => showStatus(diagStatus, "Could not copy automatically; select the text above and copy it.", "error")
+  );
+});
+
+clearDiagBtn.addEventListener("click", () => {
+  chrome.runtime.sendMessage({ type: "CLEAR_DIAGNOSTICS" }, () => {
+    showStatus(diagStatus, "Diagnostics cleared.", "info");
+    loadDiagnostics();
+  });
+});
+
 clearCacheBtn.addEventListener("click", () => {
   clearCacheBtn.disabled = true;
   chrome.runtime.sendMessage({ type: "CLEAR_CACHE" }, (res) => {
@@ -543,12 +604,23 @@ function renderList(container, list, listName) {
   for (let i = 0; i < list.length; i++) {
     const entry = list[i];
     const name = entry.channel || entry;
+    const trusted = !!(entry && typeof entry === "object" && entry.trusted);
     const item = document.createElement("div");
     item.className = "list-item";
     item.innerHTML = `
       <span>${escapeHtml(name)}</span>
-      <button class="remove-btn" data-index="${i}" title="Remove">&times;</button>
+      <span style="display:flex;align-items:center;gap:0.75rem">
+        ${listName === "whitelist" ? `
+          <label class="trust-toggle" title="Skip the short verification pause too — videos from this channel start instantly. Use only for channels you trust completely.">
+            <input type="checkbox" class="trust-cb" ${trusted ? "checked" : ""}> Trusted — play instantly
+          </label>` : ""}
+        <button class="remove-btn" data-index="${i}" title="Remove">&times;</button>
+      </span>
     `;
+    item.querySelector(".trust-cb")?.addEventListener("change", (e) => {
+      list[i] = { channel: name, trusted: e.target.checked };
+      chrome.storage.local.set({ [listName]: list });
+    });
     item.querySelector(".remove-btn").addEventListener("click", () => {
       list.splice(i, 1);
       chrome.storage.local.set({ [listName]: list }, () => {

@@ -139,6 +139,8 @@
       font-size: 1.1rem; padding: 0 0.25rem; font-weight: bold;
     }
     .list-empty { font-size: 0.8rem; color: #9e9e9e; font-style: italic; }
+    .trust-toggle { display: flex; align-items: center; gap: 0.35rem; font-size: 0.8rem; color: #2e7d32; cursor: pointer; white-space: nowrap; }
+    .trust-toggle input { accent-color: #2e7d32; cursor: pointer; }
 
     /* PIN section */
     .pin-row { display: flex; gap: 0.75rem; align-items: flex-end; }
@@ -327,7 +329,12 @@
     <!-- Channel whitelist -->
     <div class="card">
       <h2>Whitelisted Channels</h2>
-      <p class="hint">These channels are always allowed — no AI check needed. Enter the channel name or @handle.</p>
+      <p class="hint">
+        Videos from these channels are never sent to the AI. They still pause for under a second while the
+        extension confirms the channel, so a bad video can't slip through on a stale page. Tick
+        <strong>Trusted — play instantly</strong> to skip even that for channels you trust completely.
+        Enter the channel name or @handle (an @handle is the most reliable).
+      </p>
       <div class="list-container">
         <div class="list-input-row">
           <input type="text" id="whitelistInput" placeholder="e.g. @NationalGeographic">
@@ -335,6 +342,22 @@
         </div>
         <div class="list-items" id="whitelistItems"></div>
       </div>
+    </div>
+
+    <!-- Diagnostics -->
+    <div class="card">
+      <h2>Diagnostics</h2>
+      <p class="hint">
+        When a video "could not be checked", the real reason (provider, status, message) is recorded here.
+        Click <strong>Copy diagnostics</strong> and paste the result when reporting a problem.
+      </p>
+      <div class="btn-row">
+        <button class="btn-outline" id="refreshDiagBtn">Refresh</button>
+        <button class="btn-outline" id="copyDiagBtn">Copy diagnostics</button>
+        <button class="btn-clear" id="clearDiagBtn">Clear</button>
+      </div>
+      <pre id="diagOut" style="margin-top:0.75rem;font-size:0.78rem;line-height:1.45;background:#fafafa;border:1px solid #e8e8e8;border-radius:6px;padding:0.75rem;max-height:280px;overflow:auto;white-space:pre-wrap;word-break:break-word;"></pre>
+      <p class="status" id="diagStatus"></p>
     </div>
 
     <!-- Recommended alternatives -->

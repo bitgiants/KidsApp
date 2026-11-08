@@ -223,19 +223,49 @@ function cacheSet(key, value) {
 
 const inFlight = new Map(); // videoId → Promise<result>
 
+// Chrome stops an idle MV3 service worker after ~30 s; a long evaluation
+// (queue wait + transcript + model call) can cross that line and the
+// content script then never gets its reply.  Touching an extension API
+// resets the idle timer, so ping one every 20 s while work is in flight.
+const KEEPALIVE_INTERVAL_MS = 20000;
+let keepaliveTimer = null;
+
+function updateKeepalive() {
+  const busy = inFlight.size > 0;
+  const canPing = typeof chrome !== "undefined" && typeof chrome.runtime?.getPlatformInfo === "function";
+  if (busy && !keepaliveTimer && canPing) {
+    keepaliveTimer = setInterval(() => {
+      try { chrome.runtime.getPlatformInfo(() => {}); } catch { /* worker going away */ }
+    }, KEEPALIVE_INTERVAL_MS);
+  } else if (!busy && keepaliveTimer) {
+    clearInterval(keepaliveTimer);
+    keepaliveTimer = null;
+  }
+}
+
 const MAX_CONCURRENT_EVALUATIONS = 4;
 let activeEvaluations = 0;
 const evaluationQueue = [];
 
-function withConcurrencyLimit(task) {
+/**
+ * Queue a network-bound task.  `priority` work (the video the child is
+ * actually watching) goes to the front of the queue AND may use one extra
+ * slot, so it never sits behind a page full of thumbnail checks.
+ */
+function withConcurrencyLimit(task, { priority = false } = {}) {
   return new Promise((resolve, reject) => {
-    evaluationQueue.push({ task, resolve, reject });
+    const entry = { task, resolve, reject, priority };
+    if (priority) evaluationQueue.unshift(entry);
+    else evaluationQueue.push(entry);
     pumpQueue();
   });
 }
 
 function pumpQueue() {
-  while (activeEvaluations < MAX_CONCURRENT_EVALUATIONS && evaluationQueue.length > 0) {
+  while (evaluationQueue.length > 0) {
+    const next = evaluationQueue[0];
+    const limit = MAX_CONCURRENT_EVALUATIONS + (next.priority ? 1 : 0);
+    if (activeEvaluations >= limit) break;
     const { task, resolve, reject } = evaluationQueue.shift();
     activeEvaluations++;
     Promise.resolve()
@@ -255,7 +285,24 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function fetchWithRetry(url, options, retries = 1) {
+// Rate limits get their own, more patient budget: the provider tells us
+// how long to wait (Retry-After header, or a "retry in Ns" hint in the
+// body as Gemini does), and we'd rather wait than fail the check.
+const RATE_LIMIT_MAX_RETRIES = 3;
+const RATE_LIMIT_MAX_DELAY_MS = 30000;
+
+/** Milliseconds to wait after a 429, from the provider's hints or backoff. */
+function rateLimitDelayMs(retryAfterHeader, bodyText, attempt) {
+  const header = Number(retryAfterHeader);
+  if (header > 0) return Math.min(header * 1000, RATE_LIMIT_MAX_DELAY_MS);
+  const m = /retry(?:Delay|\s+in|\s+after)["\s:]*([0-9.]+)\s*s/i.exec(String(bodyText || ""));
+  if (m && Number(m[1]) > 0) {
+    return Math.min(Math.ceil(Number(m[1]) * 1000) + 500, RATE_LIMIT_MAX_DELAY_MS);
+  }
+  return Math.min(RETRY_DELAY_MS * 2 ** attempt, RATE_LIMIT_MAX_DELAY_MS); // 3 s, 6 s, 12 s
+}
+
+async function fetchWithRetry(url, options, retries = 2) {
   let attempt = 0;
   for (;;) {
     let response;
@@ -264,17 +311,26 @@ async function fetchWithRetry(url, options, retries = 1) {
     } catch (err) {
       if (attempt >= retries) throw err;
       attempt++;
-      warn(`Network error (${err.message}); retrying in ${RETRY_DELAY_MS}ms`);
-      await sleep(RETRY_DELAY_MS);
+      const delay = RETRY_DELAY_MS * attempt;
+      warn(`Network error (${err.message}); retrying in ${delay}ms`);
+      await sleep(delay);
       continue;
     }
-    const retryable = response.status === 429 || response.status >= 500;
-    if (retryable && attempt < retries) {
+    if (response.status === 429 && attempt < RATE_LIMIT_MAX_RETRIES) {
+      attempt++;
+      let body = "";
+      try { body = await response.clone().text(); } catch { /* no body */ }
+      const delay = rateLimitDelayMs(response.headers?.get?.("retry-after"), body, attempt);
+      warn(`API 429 (rate limited); waiting ${delay}ms before retry ${attempt}/${RATE_LIMIT_MAX_RETRIES}`);
+      await sleep(delay);
+      continue;
+    }
+    if (response.status >= 500 && attempt < retries) {
       attempt++;
       const retryAfter = Number(response.headers?.get?.("retry-after"));
       const delay = retryAfter > 0
         ? Math.min(retryAfter * 1000, RETRY_MAX_DELAY_MS)
-        : RETRY_DELAY_MS;
+        : RETRY_DELAY_MS * attempt;
       warn(`API ${response.status}; retrying in ${delay}ms`);
       await sleep(delay);
       continue;
@@ -313,6 +369,7 @@ async function getSettings() {
   }
 
   const model = data.aiModel || providerDef.defaultModel;
+  lastSettingsSummary = { provider, model };
 
   // Blocked categories: merge defaults with user overrides.
   let blockedCategories;
@@ -603,9 +660,23 @@ async function queryGemini(apiKey, model, userPrompt, systemPrompt) {
   }
 
   const data = await response.json();
+  return geminiVerdict(data, model);
+}
+
+const SAFETY_FILTER_REASON = "Flagged by the AI provider's safety filter.";
+
+/** Turn a Gemini generateContent response into a verdict (pure, testable). */
+function geminiVerdict(data, model) {
+  // Gemini's own safety filter withholds the reply for content it deems
+  // harmful — for a kids' filter that is a BLOCK, not a failed check.
+  const blockReason = data?.promptFeedback?.blockReason;
+  const finish = data?.candidates?.[0]?.finishReason;
+  if (blockReason || finish === "SAFETY" || finish === "PROHIBITED_CONTENT" || finish === "BLOCKLIST") {
+    log(`[Gemini/${model}] Safety filter:`, blockReason || finish);
+    return { decision: "BLOCK", reason: SAFETY_FILTER_REASON };
+  }
   const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!rawText) throw new Error("Gemini returned an empty response.");
-
   log(`[Gemini/${model}] Response:`, rawText);
   return parseAIResponse(rawText);
 }
@@ -648,12 +719,21 @@ function queryOpenAICompatible(endpoint, extraHeaders = {}, extraBody = {}) {
     }
 
     const data = await response.json();
-    const rawText = data?.choices?.[0]?.message?.content;
-    if (!rawText) throw new Error("API returned an empty response.");
-
-    log(`[${model}] Response:`, rawText);
-    return parseAIResponse(rawText);
+    return openAIVerdict(data, model);
   };
+}
+
+/** Turn an OpenAI-style chat completion into a verdict (pure, testable). */
+function openAIVerdict(data, model) {
+  const choice = data?.choices?.[0];
+  if (choice?.finish_reason === "content_filter") {
+    log(`[${model}] Content filter triggered`);
+    return { decision: "BLOCK", reason: SAFETY_FILTER_REASON };
+  }
+  const rawText = choice?.message?.content;
+  if (!rawText) throw new Error("API returned an empty response.");
+  log(`[${model}] Response:`, rawText);
+  return parseAIResponse(rawText);
 }
 
 // ─── Provider: Anthropic ─────────────────────────────────────────────
@@ -768,8 +848,12 @@ async function evaluateVideo(payload) {
     return inFlight.get(videoId);
   }
 
-  const task = evaluateUncached(payload).finally(() => inFlight.delete(videoId));
+  const task = evaluateUncached(payload).finally(() => {
+    inFlight.delete(videoId);
+    updateKeepalive();
+  });
   inFlight.set(videoId, task);
+  updateKeepalive();
   return task;
 }
 
@@ -845,8 +929,8 @@ async function evaluateUncached(payload) {
       settings.blockedCategories, settings.customPrompt, settings.ageRange
     );
     const userPrompt = buildUserPrompt(payload);
-    const { decision, reason } = await settings.providerDef.query(
-      settings.apiKey, settings.model, userPrompt, systemPrompt
+    const { decision, reason } = await queryProviderWithRetry(
+      settings, userPrompt, systemPrompt, videoId
     );
 
     const result = {
@@ -856,7 +940,30 @@ async function evaluateUncached(payload) {
 
     cacheSet(videoId, result);
     return result;
-  });
+  }, { priority: payload.source === "watch" });
+}
+
+const PROVIDER_RETRY_DELAY_MS = 2000;
+
+/**
+ * One more attempt on transient failures (malformed/empty replies, a 429
+ * or 5xx that outlived fetchWithRetry, network blips).  Never on auth
+ * errors — a bad key won't fix itself.
+ */
+async function queryProviderWithRetry(settings, userPrompt, systemPrompt, videoId) {
+  try {
+    return await settings.providerDef.query(
+      settings.apiKey, settings.model, userPrompt, systemPrompt
+    );
+  } catch (err) {
+    if (/\b(401|403|429)\b/.test(err.message)) throw err;
+    warn(`Provider call for ${videoId} failed (${err.message}); retrying once`);
+    await sleep(PROVIDER_RETRY_DELAY_MS);
+    const stricter = `${userPrompt}\n\nReply with the JSON object only.`;
+    return settings.providerDef.query(
+      settings.apiKey, settings.model, stricter, systemPrompt
+    );
+  }
 }
 
 // ─── PIN verification for settings access ────────────────────────────
@@ -1014,6 +1121,73 @@ function getAnthropicFallbackModels() {
   ];
 }
 
+// ─── Failure classification & diagnostics ───────────────────────────
+// A failed check is NOT the same as a video judged unsuitable.  The child
+// sees a kid-safe sentence that says what to do; the parent can read the
+// underlying cause in Options → Diagnostics without opening DevTools.
+
+function classifyError(err) {
+  const msg = String((err && err.message) || err || "");
+  if (/\b429\b|RESOURCE_EXHAUSTED|rate.?limit|quota/i.test(msg)) {
+    return { kind: "rate_limit", retryable: true,
+      reason: "The AI service is busy right now — please wait a moment and try again." };
+  }
+  if (/\b(401|403)\b|No API key|api key/i.test(msg)) {
+    return { kind: "auth", retryable: false,
+      reason: "The AI service rejected the API key — a parent needs to check the extension settings." };
+  }
+  if (/Failed to fetch|NetworkError|network|ECONN|timed? ?out/i.test(msg)) {
+    return { kind: "network", retryable: true,
+      reason: "Could not reach the AI service — please check the internet connection and try again." };
+  }
+  if (/Failed to parse|Unexpected decision|empty response|Unexpected AI JSON/i.test(msg)) {
+    return { kind: "bad_reply", retryable: true,
+      reason: "The AI gave an unreadable answer — please try again." };
+  }
+  if (/\b5\d\d\b/.test(msg)) {
+    return { kind: "server", retryable: true,
+      reason: "The AI service had a problem — please try again." };
+  }
+  return { kind: "unknown", retryable: true,
+    reason: "The safety check could not be completed — please try again." };
+}
+
+const MAX_RECENT_FAILURES = 25;
+let lastSettingsSummary = { provider: null, model: null };
+
+async function recordFailure(entry) {
+  if (!hasStorage()) return;
+  try {
+    const { recentFailures } = await chrome.storage.local.get("recentFailures");
+    const list = Array.isArray(recentFailures) ? recentFailures : [];
+    list.push({
+      t: Date.now(),
+      ...lastSettingsSummary,
+      ...entry,
+      message: String(entry.message || "").slice(0, 300),
+    });
+    while (list.length > MAX_RECENT_FAILURES) list.shift();
+    await chrome.storage.local.set({ recentFailures: list });
+  } catch (e) {
+    warn("Could not record failure:", e.message);
+  }
+}
+
+async function getDiagnostics() {
+  let version = "?";
+  try { version = chrome.runtime.getManifest().version; } catch { /* tests */ }
+  const { recentFailures } = hasStorage() ? await chrome.storage.local.get("recentFailures") : {};
+  return {
+    version,
+    ...lastSettingsSummary,
+    cacheSize: cache.size,
+    inFlight: inFlight.size,
+    queued: evaluationQueue.length,
+    active: activeEvaluations,
+    recentFailures: Array.isArray(recentFailures) ? recentFailures : [],
+  };
+}
+
 // ─── Message listener ────────────────────────────────────────────────
 
 if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
@@ -1026,11 +1200,10 @@ if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
           sendResponse(result);
         })
         .catch((err) => {
-          error("Evaluation failed:", err.message, err.stack);
-          sendResponse({
-            blocked: true,
-            reason: "Safety check unavailable — video blocked as a precaution.",
-          });
+          const info = classifyError(err);
+          error(`Evaluation failed [${info.kind}]:`, err.message, err.stack);
+          recordFailure({ videoId: message.payload?.videoId, source: message.payload?.source, kind: info.kind, message: err.message });
+          sendResponse({ blocked: true, reason: info.reason, retryable: info.retryable, kind: info.kind });
         });
       return true;
     }
@@ -1067,6 +1240,18 @@ if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
 
     if (message.type === "CLEAR_PIN") {
       clearPin().then((result) => sendResponse(result));
+      return true;
+    }
+
+    if (message.type === "GET_DIAGNOSTICS") {
+      getDiagnostics().then(sendResponse).catch((err) => sendResponse({ error: err.message }));
+      return true;
+    }
+
+    if (message.type === "CLEAR_DIAGNOSTICS") {
+      Promise.resolve(hasStorage() ? chrome.storage.local.remove("recentFailures") : null)
+        .then(() => sendResponse({ ok: true }))
+        .catch((err) => sendResponse({ ok: false, error: err.message }));
       return true;
     }
 
@@ -1126,6 +1311,12 @@ if (typeof module !== "undefined" && module.exports) {
     unescapeJsonString,
     sampleTranscript,
     TRANSCRIPT_MAX_CHARS,
+    geminiVerdict,
+    openAIVerdict,
+    SAFETY_FILTER_REASON,
+    classifyError,
+    rateLimitDelayMs,
+    RATE_LIMIT_MAX_DELAY_MS,
     decodeEntities,
     normalizeChannel,
     isChannelInList,
