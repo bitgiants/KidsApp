@@ -1213,10 +1213,21 @@ async function recordFailure(entry) {
 async function getDiagnostics() {
   let version = "?";
   try { version = chrome.runtime.getManifest().version; } catch { /* tests */ }
-  const { recentFailures } = hasStorage() ? await chrome.storage.local.get("recentFailures") : {};
+  // Read the saved settings rather than this worker's memory: MV3 restarts
+  // the worker often, and a fresh one knows nothing until a check runs.
+  const data = hasStorage()
+    ? await chrome.storage.local.get(["aiProvider", "aiModel", "fallbackModels", "recentFailures"])
+    : {};
+  const provider = data.aiProvider || "gemini";
+  const providerDef = PROVIDERS[provider];
+  await hydrateCache();
+  const { recentFailures } = data;
   return {
     version,
-    ...lastSettingsSummary,
+    provider,
+    model: data.aiModel || null,
+    defaultModel: providerDef ? providerDef.defaultModel : null,
+    fallbackModels: Array.isArray(data.fallbackModels) ? data.fallbackModels : [],
     cacheSize: cache.size,
     inFlight: inFlight.size,
     queued: evaluationQueue.length,
