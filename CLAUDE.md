@@ -60,6 +60,16 @@ loaded as-is.
 - **Anthropic specifics**: current Claude models reject `temperature`, return a `thinking`
   block before the `text` block, and may return `stop_reason: "refusal"` (treated as BLOCK).
   Keep `queryAnthropic` in sync with the API when changing models.
+- **Shorts** are blocked at the URL level: any `/shorts/` page gets a full-screen block, every
+  `<video>` is paused + muted, and the tab is sent to the home page (`blockShortsPage`). Shorts
+  shelves and the Shorts nav entry are hidden by CSS. Per-player overlays proved unreliable.
+- **Block screens** offer up to four parent-configured alternatives (`recommendations` in
+  storage, managed in Options), falling back to whitelisted `@handles`. Only youtube.com
+  destinations are ever rendered; entries are validated on save *and* on render.
+- **Metadata**: the background fetches the watch page and uses its `videoDetails` (keyed by
+  video ID) as the authoritative title/author/description; the content script only forwards
+  scraped text once `<ytd-watch-flexy video-id>` matches the URL. Transcripts are sampled from
+  the opening *and* the middle of the caption track.
 - **PIN** is stored as a SHA-256 hash; verification is rate-limited in the service worker.
 - **content.js** must survive YouTube's SPA navigation (`yt-navigate-finish`) and must not
   read stale watch-page metadata for a new video — see `waitForMetadata`.

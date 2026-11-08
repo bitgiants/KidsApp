@@ -33,6 +33,14 @@
   // stay paused — not just the last one we happened to see.
   const enforcedVideos = new Set();
 
+  // Shorts page-block state lives up here too: disableGuard() may run from
+  // a storage callback before the Shorts section below has been evaluated.
+  const SHORTS_BLOCK_ID = "ytkg-shorts-block";
+  const SHORTS_REDIRECT_DELAY_MS = 2500;
+  const HOME_URL = "https://www.youtube.com/";
+  let shortsRedirectTimer = null;
+  const mutedByGuard = new Set();
+
   function onEnforcedPlay(event) {
     const video = event.currentTarget;
     if (enforcedVideos.has(video) && !video.paused) video.pause();
@@ -90,6 +98,7 @@
     document.querySelectorAll(".ytkg-overlay").forEach((el) => el.remove());
     document.getElementById("ytkg-channel-block")?.remove();
     releaseAllBlocks();
+    removeShortsPageBlock();
 
     // Remove the injected stylesheet so all CSS shields disappear.
     document.getElementById("ytkg-styles")?.remove();
@@ -123,6 +132,7 @@
     scanThumbnails();
     const video = document.querySelector("video");
     if (video) onVideoFound(video);
+    if (isYouTubeShorts()) blockShortsPage();
     checkChannelPage();
   }
 
@@ -213,6 +223,42 @@
 
       .ytkg-overlay__back-btn:hover {
         opacity: 0.85;
+      }
+
+      .ytkg-overlay--analyzing .ytkg-overlay__title { font-size: 2rem; }
+      .ytkg-overlay--analyzing .ytkg-spinner {
+        width: 64px; height: 64px; border-width: 5px; margin-bottom: 1.5rem;
+      }
+      .ytkg-overlay__reason--wait { font-size: 1.3rem; max-width: 560px; }
+      .ytkg-overlay--blocked { overflow-y: auto; }
+
+      /* ── Recommended alternatives on block screens ── */
+      .ytkg-alts { margin-top: 1.5rem; width: 100%; max-width: 720px; }
+      .ytkg-alts__title { font-size: 1.05rem; font-weight: 600; margin: 0 0 0.75rem; }
+      .ytkg-alts__grid { display: flex; flex-wrap: wrap; gap: 0.75rem; justify-content: center; }
+      .ytkg-alt {
+        display: flex; flex-direction: column; align-items: center; width: 160px;
+        text-decoration: none; color: #fff; background: rgba(255,255,255,0.14);
+        border-radius: 8px; padding: 0.5rem; transition: background 0.2s;
+      }
+      .ytkg-alt:hover { background: rgba(255,255,255,0.26); }
+      .ytkg-alt__thumb {
+        width: 144px; height: 81px; object-fit: cover; border-radius: 6px;
+        background: rgba(0,0,0,0.3); display: flex; align-items: center;
+        justify-content: center; font-size: 2rem;
+      }
+      .ytkg-alt__label {
+        font-size: 0.85rem; margin-top: 0.4rem; text-align: center;
+        line-height: 1.3; max-height: 2.6em; overflow: hidden;
+      }
+
+      /* ── Shorts: remove the ways in (the /shorts/ URL itself is blocked
+         by blockShortsPage; this just removes the temptation) ── */
+      ytd-rich-shelf-renderer[is-shorts],
+      ytd-reel-shelf-renderer,
+      ytd-guide-entry-renderer:has(a[title="Shorts"]),
+      ytd-mini-guide-entry-renderer:has(a[title="Shorts"]) {
+        display: none !important;
       }
 
       /* ── Thumbnail: CSS-first hover/preview blocking ── */
@@ -388,6 +434,7 @@
       <p class="ytkg-channel-block__reason">${escapeHtml(reason || "This channel is not allowed.")}</p>
       <p class="ytkg-channel-block__reason">@${escapeHtml(channelName)}</p>
       <button class="ytkg-overlay__back-btn" id="ytkg-channel-back-btn">Go Back</button>
+      ${renderAlternativesHtml()}
     `;
     document.body.appendChild(overlay);
     document.getElementById("ytkg-channel-back-btn").addEventListener("click", () => {
@@ -576,8 +623,8 @@
     overlay.className = "ytkg-overlay ytkg-overlay--analyzing";
     overlay.innerHTML = `
       <div class="ytkg-spinner"></div>
-      <p class="ytkg-overlay__title">Analyzing video&hellip;</p>
-      <p class="ytkg-overlay__reason">Checking if this content is kid-friendly. This may take a few seconds.</p>
+      <p class="ytkg-overlay__title">One moment, please!</p>
+      <p class="ytkg-overlay__reason ytkg-overlay__reason--wait">We're checking this video to make sure it's OK to watch.<br>Please wait a few seconds&hellip;</p>
     `;
 
     container.appendChild(overlay);
@@ -608,6 +655,7 @@
       <p class="ytkg-overlay__title">Video Blocked</p>
       <p class="ytkg-overlay__reason">${escapeHtml(reason)}</p>
       <button class="ytkg-overlay__back-btn" type="button">Go Back</button>
+      ${renderAlternativesHtml()}
     `;
     overlay.querySelector(".ytkg-overlay__back-btn").addEventListener("click", () => {
       goBackOrHome();
@@ -629,58 +677,158 @@
     return div.innerHTML;
   }
 
+  // ─── Recommended alternatives ─────────────────────────────────────
+  // Parents list approved videos/channels in Options; every block screen
+  // offers up to four of them.  Whitelisted @handles are the fallback.
+
+  const MAX_ALTERNATIVES = 4;
+  const YT_HOSTS = new Set(["www.youtube.com", "youtube.com", "m.youtube.com", "youtu.be"]);
+  let recommendations = [];
+  let whitelistEntries = [];
+
+  chrome.storage.local.get(["recommendations", "whitelist"], (data) => {
+    recommendations = Array.isArray(data.recommendations) ? data.recommendations : [];
+    whitelistEntries = Array.isArray(data.whitelist) ? data.whitelist : [];
+  });
+  chrome.storage.onChanged.addListener((changes) => {
+    if (changes.recommendations) {
+      recommendations = Array.isArray(changes.recommendations.newValue) ? changes.recommendations.newValue : [];
+    }
+    if (changes.whitelist) {
+      whitelistEntries = Array.isArray(changes.whitelist.newValue) ? changes.whitelist.newValue : [];
+    }
+  });
+
+  /**
+   * Turn a stored entry (or raw string) into a safe { url, label, videoId }
+   * or null.  Only youtube.com destinations are ever rendered, and never
+   * Shorts.  Options validates on save; this re-validates on render.
+   */
+  function normalizeAlternative(entry) {
+    const raw = typeof entry === "string" ? entry : (entry && (entry.url || entry.channel)) || "";
+    const label = entry && typeof entry === "object" && entry.label ? String(entry.label).slice(0, 80) : "";
+    const text = String(raw).trim();
+    if (!text) return null;
+
+    if (/^@[A-Za-z0-9._-]{3,60}$/.test(text)) {
+      return { url: `https://www.youtube.com/${text}`, label: label || text, videoId: null };
+    }
+
+    let url;
+    try {
+      url = new URL(/^https?:\/\//i.test(text) ? text : `https://${text}`);
+    } catch {
+      return null;
+    }
+    if (!YT_HOSTS.has(url.hostname)) return null;
+
+    let videoId = null;
+    if (url.hostname === "youtu.be") videoId = url.pathname.slice(1);
+    else if (url.pathname === "/watch") videoId = url.searchParams.get("v");
+    if (videoId) {
+      if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) return null;
+      return { url: `https://www.youtube.com/watch?v=${videoId}`, label: label || "Recommended video", videoId };
+    }
+
+    if (url.pathname === "/playlist") {
+      const list = url.searchParams.get("list") || "";
+      if (!/^[A-Za-z0-9_-]{10,80}$/.test(list)) return null;
+      return { url: `https://www.youtube.com/playlist?list=${list}`, label: label || "Recommended playlist", videoId: null };
+    }
+
+    const channelPath = /^\/(@[A-Za-z0-9._-]{3,60}|channel\/[A-Za-z0-9_-]{10,40}|c\/[A-Za-z0-9._-]{1,60}|user\/[A-Za-z0-9._-]{1,60})(?:\/[A-Za-z]*)?\/?$/.exec(url.pathname);
+    if (channelPath) {
+      return { url: `https://www.youtube.com/${channelPath[1]}`, label: label || channelPath[1].replace(/^(channel|c|user)\//, ""), videoId: null };
+    }
+    return null;
+  }
+
+  function getAlternatives() {
+    const out = [];
+    const seen = new Set();
+    const push = (entry) => {
+      const alt = normalizeAlternative(entry);
+      if (alt && !seen.has(alt.url) && out.length < MAX_ALTERNATIVES) {
+        seen.add(alt.url);
+        out.push(alt);
+      }
+    };
+    recommendations.forEach(push);
+    if (out.length < MAX_ALTERNATIVES) {
+      // Whitelisted @handles link cleanly; plain display names can't.
+      whitelistEntries.forEach((e) => {
+        const name = String((typeof e === "string" ? e : e && e.channel) || "").trim();
+        if (name.startsWith("@")) push(name);
+      });
+    }
+    return out;
+  }
+
+  function renderAlternativesHtml() {
+    const alts = getAlternatives();
+    if (alts.length === 0) return "";
+    const items = alts.map((alt) => {
+      const thumb = alt.videoId
+        ? `<img class="ytkg-alt__thumb" src="https://i.ytimg.com/vi/${alt.videoId}/mqdefault.jpg" alt="">`
+        : `<span class="ytkg-alt__thumb ytkg-alt__thumb--channel">&#9654;</span>`;
+      return `<a class="ytkg-alt" href="${escapeHtml(alt.url)}">${thumb}<span class="ytkg-alt__label">${escapeHtml(alt.label)}</span></a>`;
+    }).join("");
+    return `<div class="ytkg-alts"><p class="ytkg-alts__title">Try one of these instead:</p><div class="ytkg-alts__grid">${items}</div></div>`;
+  }
+
   // ─── Shorts blocking ──────────────────────────────────────────────
-  // The Shorts page keeps several players alive (previous / active /
-  // preloaded next) and autoplays whichever is in view.  Every <video>
-  // on the page therefore gets its own persistent overlay + enforcement;
-  // nothing here depends on which one YouTube considers "active".
+  // Shorts are blocked at the URL level: any youtube.com/shorts/… page
+  // gets a full-screen block, every <video> on it is paused and muted,
+  // and the tab is sent back to the home page after a short countdown.
+  // (Per-player overlays were unreliable: the Shorts page keeps several
+  // players alive and swaps them around while you scroll.)
 
-  const SHORTS_REASON = "YouTube Shorts are not allowed.";
+  function blockShortsPage() {
+    if (!guardEnabled) return;
 
-  // <video> elements that are NOT a main player: inline thumbnail previews
-  // and the floating hover-preview player.  (Mirrors THUMB_CARD_SELECTORS,
-  // which is declared further down and must not be referenced at load.)
-  const NON_PLAYER_VIDEO_SELECTORS = [
-    "ytd-rich-item-renderer",
-    "ytd-video-renderer",
-    "ytd-compact-video-renderer",
-    "ytd-grid-video-renderer",
-    "ytm-shorts-lockup-view-model-v2",
-    "ytd-reel-item-renderer",
-    "ytd-video-preview",
-  ].join(", ");
-
-  function isPlayerVideo(videoEl) {
-    return !videoEl.closest(NON_PLAYER_VIDEO_SELECTORS);
-  }
-
-  function blockShortsVideo(videoEl) {
-    enforceBlock(videoEl);
-    const container = getPlayerContainer(videoEl);
-    if (!container) return;
-    if (getComputedStyle(container).position === "static") {
-      container.style.position = "relative";
-    }
-    let overlay = container.querySelector(":scope > .ytkg-overlay");
-    if (!overlay) {
-      overlay = document.createElement("div");
-      overlay.dataset.ytkgShorts = "1";
-      container.appendChild(overlay);
-    }
-    if (!overlay.classList.contains("ytkg-overlay--blocked")) {
-      renderBlockedOverlay(overlay, SHORTS_REASON);
-    }
-  }
-
-  /** Block every main-player <video> on the current Shorts page. */
-  function blockAllShorts() {
-    let count = 0;
+    // 1. Nothing may play while we are here.
     document.querySelectorAll("video").forEach((videoEl) => {
-      if (!isPlayerVideo(videoEl)) return;
-      blockShortsVideo(videoEl);
-      count++;
+      enforceBlock(videoEl);
+      if (!videoEl.muted) {
+        videoEl.muted = true;
+        mutedByGuard.add(videoEl);
+      }
     });
-    return count;
+
+    // 2. Full-screen block (created once per page).
+    if (!document.getElementById(SHORTS_BLOCK_ID)) {
+      const overlay = document.createElement("div");
+      overlay.id = SHORTS_BLOCK_ID;
+      overlay.className = "ytkg-channel-block";
+      overlay.innerHTML = `
+        <p class="ytkg-channel-block__title">YouTube Shorts are not allowed</p>
+        <p class="ytkg-channel-block__reason">Taking you back to the home page&hellip;</p>
+        <button class="ytkg-overlay__back-btn" type="button">Go to Home now</button>
+        ${renderAlternativesHtml()}
+      `;
+      overlay.querySelector(".ytkg-overlay__back-btn").addEventListener("click", () => {
+        window.location.replace(HOME_URL);
+      });
+      document.body.appendChild(overlay);
+    }
+
+    // 3. Leave.  replace() so the Back button can't land on Shorts again.
+    if (!shortsRedirectTimer) {
+      shortsRedirectTimer = setTimeout(() => {
+        shortsRedirectTimer = null;
+        if (guardEnabled && isYouTubeShorts()) window.location.replace(HOME_URL);
+      }, SHORTS_REDIRECT_DELAY_MS);
+    }
+  }
+
+  function removeShortsPageBlock() {
+    document.getElementById(SHORTS_BLOCK_ID)?.remove();
+    if (shortsRedirectTimer) {
+      clearTimeout(shortsRedirectTimer);
+      shortsRedirectTimer = null;
+    }
+    for (const videoEl of mutedByGuard) videoEl.muted = false;
+    mutedByGuard.clear();
   }
 
   // ─── Video handling ──────────────────────────────────────────────────
@@ -748,8 +896,8 @@
     // so we block every time the video src changes on a /shorts/ page.
     // No dedup — always re-block to catch scrolling between Shorts.
     if (isYouTubeShorts()) {
-      const n = blockAllShorts();
-      log(`Shorts detected — blocked ${n} player(s):`, window.location.href);
+      log("Shorts page — blocking:", window.location.href);
+      blockShortsPage();
       return;
     }
 
@@ -941,6 +1089,7 @@
 
   function handleNavigation() {
     lastHandledHref = window.location.href;
+    if (!guardEnabled) return;
 
     // Check if we navigated to a blacklisted channel page.
     checkChannelPage();
@@ -956,9 +1105,10 @@
     // previous video.  Thumbnails on those pages are handled by
     // scanThumbnails / processThumbCard below.
     if (isYouTubeShorts()) {
-      const n = blockAllShorts();
-      log(`Shorts navigation — blocked ${n} player(s):`, window.location.href);
+      log("Shorts navigation — blocking page:", window.location.href);
+      blockShortsPage();
     } else if (getVideoId()) {
+      removeShortsPageBlock();
       // Prefer the main player's <video>; the first <video> in the DOM
       // may be an inline preview.
       const video =
@@ -968,8 +1118,9 @@
         onVideoFound(video);
       }
     } else {
-      // Navigated away from a watch page — remove any lingering overlay.
+      // Navigated away from a watch/Shorts page — drop lingering overlays.
       removeOverlay();
+      removeShortsPageBlock();
     }
 
     // YouTube rebuilds cards on SPA navigation, wiping our DOM elements.
@@ -997,9 +1148,9 @@
       log("URL changed without yt-navigate-finish:", window.location.href);
       handleNavigation();
     } else if (isYouTubeShorts()) {
-      // Safety net: whatever YouTube does to its players between
-      // navigations, every <video> on a Shorts page stays blocked.
-      blockAllShorts();
+      // Safety net: whatever YouTube does between navigations, a Shorts
+      // page stays blocked and silent until the redirect fires.
+      blockShortsPage();
     }
   }, 500);
 

@@ -337,6 +337,25 @@
       </div>
     </div>
 
+    <!-- Recommended alternatives -->
+    <div class="card">
+      <h2>Recommended Videos &amp; Channels</h2>
+      <p class="hint">
+        Shown on every "Video Blocked" screen as "Try one of these instead". Paste a YouTube video URL,
+        a channel URL, a playlist URL, or an @handle, and add an optional friendly label.
+        If this list is empty, whitelisted @channels are offered instead.
+      </p>
+      <div class="list-container">
+        <div class="list-input-row">
+          <input type="text" id="recInput" placeholder="https://www.youtube.com/watch?v=… or @Channel">
+          <input type="text" id="recLabel" placeholder="Label (optional)" style="max-width:200px">
+          <button class="btn-save" id="addRecBtn">Add</button>
+        </div>
+        <div class="list-items" id="recItems"></div>
+      </div>
+      <p class="status" id="recStatus"></p>
+    </div>
+
     <!-- Channel blacklist -->
     <div class="card">
       <h2>Blacklisted Channels</h2>

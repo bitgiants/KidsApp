@@ -7,6 +7,8 @@ const {
   sanitizeField,
   parseAIResponse,
   parseWatchPageInfo,
+  sampleTranscript,
+  TRANSCRIPT_MAX_CHARS,
   normalizeChannel,
   isChannelInList,
   isValidVideoId,
@@ -54,7 +56,7 @@ describe("buildUserPrompt", () => {
 
   test("includes transcript when present", () => {
     const result = buildUserPrompt({ title: "T", transcript: "hello world" });
-    expect(result).toContain("Transcript (first ~2 min): hello world");
+    expect(result).toContain("Transcript excerpts (opening, then middle): hello world");
   });
 
   test("caps an over-long description", () => {
@@ -425,5 +427,33 @@ describe("parseWatchPageInfo", () => {
   test("returns null for pages without videoDetails or non-strings", () => {
     expect(parseWatchPageInfo("<html>consent wall</html>", "abc123def45")).toBeNull();
     expect(parseWatchPageInfo(undefined, "abc123def45")).toBeNull();
+  });
+});
+
+// ─── sampleTranscript ────────────────────────────────────────────────
+
+describe("sampleTranscript", () => {
+  test("returns short transcripts whole, whitespace-collapsed", () => {
+    expect(sampleTranscript("hello   world\n\nagain", 100)).toBe("hello world again");
+  });
+
+  test("samples the opening and the middle of long transcripts", () => {
+    const words = [];
+    for (let i = 0; i < 2000; i++) words.push("w" + i);
+    const text = words.join(" ");
+    const out = sampleTranscript(text, 400);
+    expect(out.length).toBeLessThanOrEqual(400 + 5);
+    expect(out.startsWith("w0 w1 w2")).toBe(true);
+    expect(out).toContain(" […] ");
+    const middlePart = out.split(" […] ")[1];
+    // The middle slice comes from around the midpoint, not the start or end.
+    const firstWord = Number(middlePart.match(/w(\d+)/)[1]);
+    expect(firstWord).toBeGreaterThan(800);
+    expect(firstWord).toBeLessThan(1200);
+  });
+
+  test("default budget is the module constant", () => {
+    const long = "x ".repeat(TRANSCRIPT_MAX_CHARS);
+    expect(sampleTranscript(long).length).toBeLessThanOrEqual(TRANSCRIPT_MAX_CHARS + 5);
   });
 });
