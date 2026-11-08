@@ -223,19 +223,49 @@ function cacheSet(key, value) {
 
 const inFlight = new Map(); // videoId → Promise<result>
 
+// Chrome stops an idle MV3 service worker after ~30 s; a long evaluation
+// (queue wait + transcript + model call) can cross that line and the
+// content script then never gets its reply.  Touching an extension API
+// resets the idle timer, so ping one every 20 s while work is in flight.
+const KEEPALIVE_INTERVAL_MS = 20000;
+let keepaliveTimer = null;
+
+function updateKeepalive() {
+  const busy = inFlight.size > 0;
+  const canPing = typeof chrome !== "undefined" && typeof chrome.runtime?.getPlatformInfo === "function";
+  if (busy && !keepaliveTimer && canPing) {
+    keepaliveTimer = setInterval(() => {
+      try { chrome.runtime.getPlatformInfo(() => {}); } catch { /* worker going away */ }
+    }, KEEPALIVE_INTERVAL_MS);
+  } else if (!busy && keepaliveTimer) {
+    clearInterval(keepaliveTimer);
+    keepaliveTimer = null;
+  }
+}
+
 const MAX_CONCURRENT_EVALUATIONS = 4;
 let activeEvaluations = 0;
 const evaluationQueue = [];
 
-function withConcurrencyLimit(task) {
+/**
+ * Queue a network-bound task.  `priority` work (the video the child is
+ * actually watching) goes to the front of the queue AND may use one extra
+ * slot, so it never sits behind a page full of thumbnail checks.
+ */
+function withConcurrencyLimit(task, { priority = false } = {}) {
   return new Promise((resolve, reject) => {
-    evaluationQueue.push({ task, resolve, reject });
+    const entry = { task, resolve, reject, priority };
+    if (priority) evaluationQueue.unshift(entry);
+    else evaluationQueue.push(entry);
     pumpQueue();
   });
 }
 
 function pumpQueue() {
-  while (activeEvaluations < MAX_CONCURRENT_EVALUATIONS && evaluationQueue.length > 0) {
+  while (evaluationQueue.length > 0) {
+    const next = evaluationQueue[0];
+    const limit = MAX_CONCURRENT_EVALUATIONS + (next.priority ? 1 : 0);
+    if (activeEvaluations >= limit) break;
     const { task, resolve, reject } = evaluationQueue.shift();
     activeEvaluations++;
     Promise.resolve()
@@ -255,7 +285,7 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function fetchWithRetry(url, options, retries = 1) {
+async function fetchWithRetry(url, options, retries = 2) {
   let attempt = 0;
   for (;;) {
     let response;
@@ -264,8 +294,9 @@ async function fetchWithRetry(url, options, retries = 1) {
     } catch (err) {
       if (attempt >= retries) throw err;
       attempt++;
-      warn(`Network error (${err.message}); retrying in ${RETRY_DELAY_MS}ms`);
-      await sleep(RETRY_DELAY_MS);
+      const delay = RETRY_DELAY_MS * attempt;
+      warn(`Network error (${err.message}); retrying in ${delay}ms`);
+      await sleep(delay);
       continue;
     }
     const retryable = response.status === 429 || response.status >= 500;
@@ -274,7 +305,7 @@ async function fetchWithRetry(url, options, retries = 1) {
       const retryAfter = Number(response.headers?.get?.("retry-after"));
       const delay = retryAfter > 0
         ? Math.min(retryAfter * 1000, RETRY_MAX_DELAY_MS)
-        : RETRY_DELAY_MS;
+        : RETRY_DELAY_MS * attempt;
       warn(`API ${response.status}; retrying in ${delay}ms`);
       await sleep(delay);
       continue;
@@ -603,9 +634,23 @@ async function queryGemini(apiKey, model, userPrompt, systemPrompt) {
   }
 
   const data = await response.json();
+  return geminiVerdict(data, model);
+}
+
+const SAFETY_FILTER_REASON = "Flagged by the AI provider's safety filter.";
+
+/** Turn a Gemini generateContent response into a verdict (pure, testable). */
+function geminiVerdict(data, model) {
+  // Gemini's own safety filter withholds the reply for content it deems
+  // harmful — for a kids' filter that is a BLOCK, not a failed check.
+  const blockReason = data?.promptFeedback?.blockReason;
+  const finish = data?.candidates?.[0]?.finishReason;
+  if (blockReason || finish === "SAFETY" || finish === "PROHIBITED_CONTENT" || finish === "BLOCKLIST") {
+    log(`[Gemini/${model}] Safety filter:`, blockReason || finish);
+    return { decision: "BLOCK", reason: SAFETY_FILTER_REASON };
+  }
   const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!rawText) throw new Error("Gemini returned an empty response.");
-
   log(`[Gemini/${model}] Response:`, rawText);
   return parseAIResponse(rawText);
 }
@@ -648,12 +693,21 @@ function queryOpenAICompatible(endpoint, extraHeaders = {}, extraBody = {}) {
     }
 
     const data = await response.json();
-    const rawText = data?.choices?.[0]?.message?.content;
-    if (!rawText) throw new Error("API returned an empty response.");
-
-    log(`[${model}] Response:`, rawText);
-    return parseAIResponse(rawText);
+    return openAIVerdict(data, model);
   };
+}
+
+/** Turn an OpenAI-style chat completion into a verdict (pure, testable). */
+function openAIVerdict(data, model) {
+  const choice = data?.choices?.[0];
+  if (choice?.finish_reason === "content_filter") {
+    log(`[${model}] Content filter triggered`);
+    return { decision: "BLOCK", reason: SAFETY_FILTER_REASON };
+  }
+  const rawText = choice?.message?.content;
+  if (!rawText) throw new Error("API returned an empty response.");
+  log(`[${model}] Response:`, rawText);
+  return parseAIResponse(rawText);
 }
 
 // ─── Provider: Anthropic ─────────────────────────────────────────────
@@ -768,8 +822,12 @@ async function evaluateVideo(payload) {
     return inFlight.get(videoId);
   }
 
-  const task = evaluateUncached(payload).finally(() => inFlight.delete(videoId));
+  const task = evaluateUncached(payload).finally(() => {
+    inFlight.delete(videoId);
+    updateKeepalive();
+  });
   inFlight.set(videoId, task);
+  updateKeepalive();
   return task;
 }
 
@@ -845,8 +903,8 @@ async function evaluateUncached(payload) {
       settings.blockedCategories, settings.customPrompt, settings.ageRange
     );
     const userPrompt = buildUserPrompt(payload);
-    const { decision, reason } = await settings.providerDef.query(
-      settings.apiKey, settings.model, userPrompt, systemPrompt
+    const { decision, reason } = await queryProviderWithRetry(
+      settings, userPrompt, systemPrompt, videoId
     );
 
     const result = {
@@ -856,7 +914,30 @@ async function evaluateUncached(payload) {
 
     cacheSet(videoId, result);
     return result;
-  });
+  }, { priority: payload.source === "watch" });
+}
+
+const PROVIDER_RETRY_DELAY_MS = 2000;
+
+/**
+ * One more attempt on transient failures (malformed/empty replies, a 429
+ * or 5xx that outlived fetchWithRetry, network blips).  Never on auth
+ * errors — a bad key won't fix itself.
+ */
+async function queryProviderWithRetry(settings, userPrompt, systemPrompt, videoId) {
+  try {
+    return await settings.providerDef.query(
+      settings.apiKey, settings.model, userPrompt, systemPrompt
+    );
+  } catch (err) {
+    if (/\b(401|403)\b/.test(err.message)) throw err;
+    warn(`Provider call for ${videoId} failed (${err.message}); retrying once`);
+    await sleep(PROVIDER_RETRY_DELAY_MS);
+    const stricter = `${userPrompt}\n\nReply with the JSON object only.`;
+    return settings.providerDef.query(
+      settings.apiKey, settings.model, stricter, systemPrompt
+    );
+  }
 }
 
 // ─── PIN verification for settings access ────────────────────────────
@@ -1126,6 +1207,9 @@ if (typeof module !== "undefined" && module.exports) {
     unescapeJsonString,
     sampleTranscript,
     TRANSCRIPT_MAX_CHARS,
+    geminiVerdict,
+    openAIVerdict,
+    SAFETY_FILTER_REASON,
     decodeEntities,
     normalizeChannel,
     isChannelInList,

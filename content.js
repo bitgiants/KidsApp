@@ -67,6 +67,41 @@
     for (const videoEl of Array.from(enforcedVideos)) releaseBlock(videoEl);
   }
 
+  // ─── Background messaging with retries ─────────────────────────────
+  // A reply can fail to arrive when Chrome recycles the service worker
+  // mid-evaluation ("The message port closed…").  Rather than failing
+  // closed on the first hiccup, retry a few times — a child would rather
+  // wait ten more seconds than be told a video "could not be checked".
+  const CHECK_RETRY_DELAYS_MS = [1500, 3000, 5000];
+
+  function sendCheckVideo(payload, callback, attempt = 0) {
+    let settled = false;
+    const fail = (why) => {
+      if (settled) return;
+      settled = true;
+      if (attempt < CHECK_RETRY_DELAYS_MS.length) {
+        const delay = CHECK_RETRY_DELAYS_MS[attempt];
+        warn(`CHECK_VIDEO ${payload.videoId} failed (${why}); retry ${attempt + 1} in ${delay}ms`);
+        setTimeout(() => sendCheckVideo(payload, callback, attempt + 1), delay);
+      } else {
+        error(`CHECK_VIDEO ${payload.videoId} failed after ${attempt} retries: ${why}`);
+        callback(null, why);
+      }
+    };
+    try {
+      chrome.runtime.sendMessage({ type: "CHECK_VIDEO", payload }, (response) => {
+        if (chrome.runtime.lastError) return fail(chrome.runtime.lastError.message);
+        if (!response || typeof response !== "object") return fail("empty response");
+        if (settled) return;
+        settled = true;
+        callback(response, null);
+      });
+    } catch (err) {
+      // e.g. "Extension context invalidated" right after an extension reload.
+      fail(err.message);
+    }
+  }
+
   // ─── Enabled state ────────────────────────────────────────────────
   // The guard can be toggled on/off via the popup.  When disabled, all
   // filtering stops and existing overlays/shields are removed.
@@ -165,7 +200,12 @@
       }
 
       /* ── State: analysing (amber/yellow) ── */
+      @keyframes ytkg-appear { from { opacity: 0; } to { opacity: 1; } }
+
       .ytkg-overlay--analyzing {
+        /* Invisible for the first 350 ms: trusted-channel and cached
+           decisions resolve faster than that and never flash the screen. */
+        animation: ytkg-appear 0.25s ease 0.35s both;
         background: rgba(180, 140, 20, 0.95);
         color: #fff;
       }
@@ -232,23 +272,44 @@
       .ytkg-overlay__reason--wait { font-size: 1.3rem; max-width: 560px; }
       .ytkg-overlay--blocked { overflow-y: auto; }
 
-      /* ── Recommended alternatives on block screens ── */
-      .ytkg-alts { margin-top: 1.5rem; width: 100%; max-width: 720px; }
-      .ytkg-alts__title { font-size: 1.05rem; font-weight: 600; margin: 0 0 0.75rem; }
-      .ytkg-alts__grid { display: flex; flex-wrap: wrap; gap: 0.75rem; justify-content: center; }
-      .ytkg-alt {
-        display: flex; flex-direction: column; align-items: center; width: 160px;
-        text-decoration: none; color: #fff; background: rgba(255,255,255,0.14);
-        border-radius: 8px; padding: 0.5rem; transition: background 0.2s;
+      .ytkg-overlay__retry-btn {
+        margin-top: 0.75rem;
+        padding: 0.6rem 1.75rem;
+        font-size: 0.95rem;
+        font-weight: 500;
+        cursor: pointer;
+        border: 2px solid #fff;
+        border-radius: 6px;
+        background: transparent;
+        color: #fff;
       }
-      .ytkg-alt:hover { background: rgba(255,255,255,0.26); }
+      .ytkg-overlay__retry-btn:hover { background: rgba(255,255,255,0.15); }
+
+      /* ── Recommended alternatives on block screens: a green "approved"
+         zone that stands apart from the red block ── */
+      .ytkg-alts {
+        margin-top: 1.75rem; width: 100%; max-width: 780px;
+        background: rgba(27, 94, 32, 0.96);
+        border: 2px solid rgba(255, 255, 255, 0.4);
+        border-radius: 14px; padding: 1.25rem 1.5rem 1.5rem;
+        box-shadow: 0 6px 18px rgba(0, 0, 0, 0.3);
+        color: #fff;
+      }
+      .ytkg-alts__title { font-size: 1.5rem; font-weight: 700; margin: 0 0 1rem; }
+      .ytkg-alts__grid { display: flex; flex-wrap: wrap; gap: 1rem; justify-content: center; }
+      .ytkg-alt {
+        display: flex; flex-direction: column; align-items: center; width: 200px;
+        text-decoration: none; color: #fff; background: rgba(255,255,255,0.16);
+        border-radius: 10px; padding: 0.6rem; transition: background 0.2s, transform 0.2s;
+      }
+      .ytkg-alt:hover { background: rgba(255,255,255,0.3); transform: translateY(-2px); }
       .ytkg-alt__thumb {
-        width: 144px; height: 81px; object-fit: cover; border-radius: 6px;
+        width: 176px; height: 99px; object-fit: cover; border-radius: 8px;
         background: rgba(0,0,0,0.3); display: flex; align-items: center;
-        justify-content: center; font-size: 2rem;
+        justify-content: center; font-size: 2.6rem;
       }
       .ytkg-alt__label {
-        font-size: 0.85rem; margin-top: 0.4rem; text-align: center;
+        font-size: 1.05rem; font-weight: 600; margin-top: 0.5rem; text-align: center;
         line-height: 1.3; max-height: 2.6em; overflow: hidden;
       }
 
@@ -584,6 +645,10 @@
   // The <video> the current overlay belongs to.
   let activeVideoEl = null;
 
+  // After this long on the wait screen, reassure the child it's still working.
+  const ANALYZING_SLOW_MS = 8000;
+  let analyzingSlowTimer = null;
+
   /**
    * Find the element our overlay should cover.  We want the whole player
    * (video + controls): #movie_player on watch pages, #shorts-player on
@@ -629,6 +694,14 @@
 
     container.appendChild(overlay);
 
+    clearTimeout(analyzingSlowTimer);
+    analyzingSlowTimer = setTimeout(() => {
+      const el = overlay.isConnected && overlay.querySelector(".ytkg-overlay__reason--wait");
+      if (el) {
+        el.innerHTML = "Still checking&hellip; thanks for your patience!<br>Some videos take a little longer.";
+      }
+    }, ANALYZING_SLOW_MS);
+
     // Nothing may play until we have a verdict.
     activeVideoEl = videoEl;
     enforceBlock(videoEl);
@@ -638,28 +711,46 @@
    * Transition the existing overlay to the "blocked" state.
    * Swaps the class, removes the spinner, and shows the reason + back button.
    */
-  function showBlockedOverlay(reason) {
+  function showBlockedOverlay(reason, options = {}) {
     const overlay = document.getElementById(OVERLAY_ID);
     if (!overlay) return;
 
     // Ensure the video stays paused — and stays that way.
     enforceBlock(activeVideoEl || document.querySelector("video"));
 
-    renderBlockedOverlay(overlay, reason);
+    renderBlockedOverlay(overlay, reason, options);
   }
 
-  /** Fill an overlay element with the blocked state (shared with Shorts). */
-  function renderBlockedOverlay(overlay, reason) {
+  /**
+   * Fill an overlay element with the blocked state (shared with Shorts).
+   * `options.retry` adds a "Try again" button for the case where the
+   * check itself failed rather than the video being judged unsuitable.
+   */
+  function renderBlockedOverlay(overlay, reason, options = {}) {
+    clearTimeout(analyzingSlowTimer);
     overlay.className = "ytkg-overlay ytkg-overlay--blocked";
     overlay.innerHTML = `
-      <p class="ytkg-overlay__title">Video Blocked</p>
+      <p class="ytkg-overlay__title">${options.retry ? "Could not check this video" : "Video Blocked"}</p>
       <p class="ytkg-overlay__reason">${escapeHtml(reason)}</p>
       <button class="ytkg-overlay__back-btn" type="button">Go Back</button>
+      ${options.retry ? '<button class="ytkg-overlay__retry-btn" type="button">Try again</button>' : ""}
       ${renderAlternativesHtml()}
     `;
     overlay.querySelector(".ytkg-overlay__back-btn").addEventListener("click", () => {
       goBackOrHome();
     });
+    overlay.querySelector(".ytkg-overlay__retry-btn")?.addEventListener("click", retryCurrentCheck);
+  }
+
+  /** Re-run the check for the video on screen (after a failed check). */
+  function retryCurrentCheck() {
+    const videoEl =
+      activeVideoEl ||
+      document.querySelector("#movie_player video") ||
+      document.querySelector("video");
+    lastCheckedVideoId = null;
+    lastVerdict = null;
+    if (videoEl) handleVideoChange(videoEl);
   }
 
   /**
@@ -667,6 +758,7 @@
    */
   function removeOverlay() {
     document.querySelectorAll(".ytkg-overlay").forEach((el) => el.remove());
+    clearTimeout(analyzingSlowTimer);
     releaseAllBlocks();
     activeVideoEl = null;
   }
@@ -698,6 +790,25 @@
       whitelistEntries = Array.isArray(changes.whitelist.newValue) ? changes.whitelist.newValue : [];
     }
   });
+
+  function normalizeChannelName(name) {
+    return String(name ?? "").toLowerCase().replace(/^@/, "").trim();
+  }
+
+  /**
+   * "Trusted — play instantly" whitelist entries ({ channel, trusted: true }).
+   * Approved channels already skip the AI; trusted ones also skip the
+   * background round-trip and the wait screen.  Only consulted once the
+   * page's video-id marker proves the channel text belongs to this video.
+   */
+  function isTrustedChannel(channel, channelHandle) {
+    const names = [normalizeChannelName(channel), normalizeChannelName(channelHandle)].filter(Boolean);
+    if (names.length === 0) return false;
+    return whitelistEntries.some((entry) =>
+      entry && typeof entry === "object" && entry.trusted === true &&
+      names.includes(normalizeChannelName(entry.channel))
+    );
+  }
 
   /**
    * Turn a stored entry (or raw string) into a safe { url, label, videoId }
@@ -773,7 +884,7 @@
         : `<span class="ytkg-alt__thumb ytkg-alt__thumb--channel">&#9654;</span>`;
       return `<a class="ytkg-alt" href="${escapeHtml(alt.url)}">${thumb}<span class="ytkg-alt__label">${escapeHtml(alt.label)}</span></a>`;
     }).join("");
-    return `<div class="ytkg-alts"><p class="ytkg-alts__title">Try one of these instead:</p><div class="ytkg-alts__grid">${items}</div></div>`;
+    return `<div class="ytkg-alts"><p class="ytkg-alts__title">&#10003; Try one of these instead</p><div class="ytkg-alts__grid">${items}</div></div>`;
   }
 
   // ─── Shorts blocking ──────────────────────────────────────────────
@@ -951,9 +1062,18 @@
         title: payload.title,
         description: payload.description?.substring(0, 100),
       });
-      chrome.runtime.sendMessage(
-        { type: "CHECK_VIDEO", payload },
-        (response) => {
+
+      if (metadataFresh && isTrustedChannel(fields.channel, fields.channelHandle)) {
+        if (lastCheckedVideoId !== videoId) return;
+        log("Trusted channel — playing without a check:", fields.channelHandle || fields.channel);
+        lastVerdict = { videoId, blocked: false, reason: "Trusted channel." };
+        const target = activeVideoEl || videoEl;
+        removeOverlay();
+        target.play();
+        return;
+      }
+
+      sendCheckVideo(payload, (response, failure) => {
           // The user may have moved on while we waited.  A late verdict
           // for the OLD video must never touch the overlay of the new one.
           if (lastCheckedVideoId !== videoId) {
@@ -961,15 +1081,15 @@
             return;
           }
 
-          if (chrome.runtime.lastError) {
-            error("Messaging error:", chrome.runtime.lastError.message);
-            const reason = "Safety check unavailable — video blocked as a precaution.";
+          if (!response) {
+            error("Check failed after retries:", failure);
+            const reason = "The safety check did not complete — the video stays blocked. You can try again.";
             lastVerdict = { videoId, blocked: true, reason };
-            showBlockedOverlay(reason);
+            showBlockedOverlay(reason, { retry: true });
             return;
           }
 
-          if (response?.blocked) {
+          if (response.blocked) {
             log("BLOCKED:", response.reason);
             lastVerdict = { videoId, blocked: true, reason: response.reason };
             showBlockedOverlay(response.reason);
@@ -980,8 +1100,7 @@
             removeOverlay();
             target.play();
           }
-        }
-      );
+      });
     });
   }
 
@@ -1354,34 +1473,26 @@
     const channel = getChannelFromCard(card);
     const channelHandle = getChannelHandleFromCard(card);
 
+    if (isTrustedChannel(channel, channelHandle)) {
+      thumbChecked.set(videoId, { state: "allowed", reason: "Trusted channel." });
+      updateAllCardsForVideo(videoId);
+      return;
+    }
+
     log("Thumb check:", videoId, title ? `"${title}"` : "(no title)", channelHandle ? `@${channelHandle}` : "");
 
-    chrome.runtime.sendMessage(
-      {
-        type: "CHECK_VIDEO",
-        payload: {
-          videoId,
-          title,
-          channel,
-          channelHandle,
-          description: "",
-          source: "thumb",
-        },
-      },
-      (response) => {
-        if (chrome.runtime.lastError) {
-          error("Thumb check messaging error:", chrome.runtime.lastError.message);
+    sendCheckVideo(
+      { videoId, title, channel, channelHandle, description: "", source: "thumb" },
+      (response, failure) => {
+        if (!response) {
+          error("Thumb check failed after retries:", videoId, failure);
           // Fail closed.
-          thumbChecked.set(videoId, {
-            state: "blocked",
-            reason: "Safety check unavailable.",
-          });
+          thumbChecked.set(videoId, { state: "blocked", reason: "Safety check unavailable." });
           updateAllCardsForVideo(videoId);
           return;
         }
-
-        const state = response?.blocked ? "blocked" : "allowed";
-        const reason = response?.reason || "";
+        const state = response.blocked ? "blocked" : "allowed";
+        const reason = response.reason || "";
         thumbChecked.set(videoId, { state, reason });
         log("Thumb result:", videoId, state, reason);
         updateAllCardsForVideo(videoId);

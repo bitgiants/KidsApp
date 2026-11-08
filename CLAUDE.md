@@ -70,6 +70,13 @@ loaded as-is.
   video ID) as the authoritative title/author/description; the content script only forwards
   scraped text once `<ytd-watch-flexy video-id>` matches the URL. Transcripts are sampled from
   the opening *and* the middle of the caption track.
+- **Whitelist tiers**: a whitelisted channel skips the AI but the content script still waits for
+  the page's video-id marker before letting it play; `{ channel, trusted: true }` entries
+  ("Trusted — play instantly") are decided locally in `content.js` with no background round-trip.
+- **Resilience**: `sendCheckVideo` retries a dropped reply (service-worker recycle) with backoff
+  and finally offers "Try again"; the background keeps the worker alive while evaluations are
+  in flight, gives watch-page checks a priority lane ahead of thumbnails, retries provider
+  calls, and treats provider safety-filter responses as BLOCK rather than as an outage.
 - **PIN** is stored as a SHA-256 hash; verification is rate-limited in the service worker.
 - **content.js** must survive YouTube's SPA navigation (`yt-navigate-finish`) and must not
   read stale watch-page metadata for a new video — see `waitForMetadata`.

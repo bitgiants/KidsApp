@@ -543,12 +543,23 @@ function renderList(container, list, listName) {
   for (let i = 0; i < list.length; i++) {
     const entry = list[i];
     const name = entry.channel || entry;
+    const trusted = !!(entry && typeof entry === "object" && entry.trusted);
     const item = document.createElement("div");
     item.className = "list-item";
     item.innerHTML = `
       <span>${escapeHtml(name)}</span>
-      <button class="remove-btn" data-index="${i}" title="Remove">&times;</button>
+      <span style="display:flex;align-items:center;gap:0.75rem">
+        ${listName === "whitelist" ? `
+          <label class="trust-toggle" title="Skip the short verification pause too — videos from this channel start instantly. Use only for channels you trust completely.">
+            <input type="checkbox" class="trust-cb" ${trusted ? "checked" : ""}> Trusted — play instantly
+          </label>` : ""}
+        <button class="remove-btn" data-index="${i}" title="Remove">&times;</button>
+      </span>
     `;
+    item.querySelector(".trust-cb")?.addEventListener("change", (e) => {
+      list[i] = { channel: name, trusted: e.target.checked };
+      chrome.storage.local.set({ [listName]: list });
+    });
     item.querySelector(".remove-btn").addEventListener("click", () => {
       list.splice(i, 1);
       chrome.storage.local.set({ [listName]: list }, () => {
