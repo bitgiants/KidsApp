@@ -48,7 +48,11 @@ loaded as-is.
 
 - **Message bus**: `content.js` / `options.js` / `popup.js` talk to `background.js` via
   `chrome.runtime.sendMessage`. Message types: `CHECK_VIDEO`, `CHECK_CHANNEL`, `VERIFY_PIN`,
-  `SET_PIN`, `CLEAR_PIN`, `FETCH_MODELS`, `GET_CATEGORIES`, `GET_DEFAULT_PROMPT`.
+  `SET_PIN`, `CLEAR_PIN`, `FETCH_MODELS`, `GET_CATEGORIES`, `GET_DEFAULT_PROMPT`, `CLEAR_CACHE`,
+  `GET_DIAGNOSTICS`, `CLEAR_DIAGNOSTICS`.
+- **Model chain**: `aiModel` plus up to two `fallbackModels` (same provider) are tried in order
+  by `queryModelChain`; a rate-limited non-last model hands off after one short wait, auth
+  errors stop the chain, and a fallback answering is recorded in Diagnostics (`kind: fallback`).
 - **Evaluation pipeline** (`evaluateVideo` in background.js): validate videoId → guard-enabled
   check → persistent cache → in-flight dedup → whitelist/blacklist → concurrency-limited
   transcript fetch + provider call → cache. Any error **fails closed** (video blocked).

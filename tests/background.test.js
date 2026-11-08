@@ -15,6 +15,8 @@ const {
   classifyError,
   rateLimitDelayMs,
   RATE_LIMIT_MAX_DELAY_MS,
+  queryModelChain,
+  RATE_LIMIT_MAX_RETRIES,
   normalizeChannel,
   isChannelInList,
   isValidVideoId,
@@ -560,5 +562,65 @@ describe("rateLimitDelayMs", () => {
     expect(rateLimitDelayMs(null, "", 3)).toBe(12000);
     expect(rateLimitDelayMs("999", "", 1)).toBe(RATE_LIMIT_MAX_DELAY_MS);
     expect(rateLimitDelayMs(null, '{"retryDelay":"600s"}', 1)).toBe(RATE_LIMIT_MAX_DELAY_MS);
+  });
+});
+
+// ─── Model fallback chain ───────────────────────────────────────────
+
+describe("queryModelChain", () => {
+  const OK = { decision: "ALLOW", reason: "fine" };
+  const mkSettings = (query, fallbackModels) => ({
+    apiKey: "k", model: "primary", fallbackModels, providerDef: { query },
+  });
+
+  beforeEach(() => {
+    jest.spyOn(console, "log").mockImplementation(() => {});
+    jest.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => { jest.restoreAllMocks(); jest.useRealTimers(); });
+
+  test("uses the primary model when it works", async () => {
+    const query = jest.fn().mockResolvedValue(OK);
+    await expect(queryModelChain(mkSettings(query, ["fb1", "fb2"]), "u", "s", "v")).resolves.toEqual(OK);
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(query.mock.calls[0][1]).toBe("primary");
+    // Not the last in the chain → only a short rate-limit wait is allowed.
+    expect(query.mock.calls[0][4]).toEqual({ rateLimitRetries: 1 });
+  });
+
+  test("falls through to the next model on failure, last model gets the patient budget", async () => {
+    const query = jest.fn()
+      .mockRejectedValueOnce(new Error("API 503: overloaded"))
+      .mockRejectedValueOnce(new Error("Gemini API 429: quota"))
+      .mockResolvedValueOnce(OK);
+    await expect(queryModelChain(mkSettings(query, ["fb1", "fb2"]), "u", "s", "v")).resolves.toEqual(OK);
+    expect(query.mock.calls.map((c) => c[1])).toEqual(["primary", "fb1", "fb2"]);
+    expect(query.mock.calls[2][4]).toEqual({ rateLimitRetries: RATE_LIMIT_MAX_RETRIES });
+  });
+
+  test("an auth error stops the chain immediately (same key for every model)", async () => {
+    const query = jest.fn().mockRejectedValue(new Error("Anthropic API 401: invalid key"));
+    await expect(queryModelChain(mkSettings(query, ["fb1"]), "u", "s", "v")).rejects.toThrow("401");
+    expect(query).toHaveBeenCalledTimes(1);
+  });
+
+  test("when every model fails the last error is thrown", async () => {
+    const query = jest.fn()
+      .mockRejectedValueOnce(new Error("API 503: a"))
+      .mockRejectedValueOnce(new Error("API 429: b"));
+    await expect(queryModelChain(mkSettings(query, ["fb1"]), "u", "s", "v")).rejects.toThrow("429: b");
+    expect(query).toHaveBeenCalledTimes(2);
+  });
+
+  test("with no fallbacks the single model still gets one 'JSON only' retry on an unreadable reply", async () => {
+    jest.useFakeTimers();
+    const query = jest.fn()
+      .mockRejectedValueOnce(new Error("Failed to parse AI JSON"))
+      .mockResolvedValueOnce(OK);
+    const pending = queryModelChain(mkSettings(query, []), "u", "s", "v");
+    await jest.advanceTimersByTimeAsync(2500);
+    await expect(pending).resolves.toEqual(OK);
+    expect(query).toHaveBeenCalledTimes(2);
+    expect(query.mock.calls[1][2]).toMatch(/Reply with the JSON object only/);
   });
 });

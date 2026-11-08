@@ -24,6 +24,10 @@ const modelSelect = document.getElementById("modelSelect");
 const modelCustom = document.getElementById("modelCustom");
 const refreshModelsBtn = document.getElementById("refreshModelsBtn");
 const modelHint = document.getElementById("modelHint");
+const fallbackSelects = [
+  { select: document.getElementById("fallback1Select"), custom: document.getElementById("fallback1Custom") },
+  { select: document.getElementById("fallback2Select"), custom: document.getElementById("fallback2Custom") },
+];
 const saveProviderBtn = document.getElementById("saveProviderBtn");
 const providerStatus = document.getElementById("providerStatus");
 
@@ -186,7 +190,7 @@ clearPinBtn.addEventListener("click", () => {
 function loadAllSettings() {
   chrome.storage.local.get(
     [
-      "aiProvider", "aiModel",
+      "aiProvider", "aiModel", "fallbackModels",
       ...Object.values(storageKeys),
       "blockedCategories",
       "whitelist", "blacklist", "recommendations",
@@ -201,6 +205,8 @@ function loadAllSettings() {
 
       // Model: store the saved model and show in select or custom input.
       savedModel = data.aiModel || "";
+      const fb = Array.isArray(data.fallbackModels) ? data.fallbackModels : [];
+      savedFallbacks = [fb[0] || "", fb[1] || ""];
       resetModelSelect(savedModel);
 
       // Categories
@@ -250,12 +256,13 @@ saveProviderBtn.addEventListener("click", () => {
   const toSave = { aiProvider: provider };
 
   // Read model from select or custom input.
-  const selectedModel = modelSelect.value;
-  if (selectedModel === "__custom__") {
-    toSave.aiModel = modelCustom.value.trim();
-  } else {
-    toSave.aiModel = selectedModel || "";
-  }
+  toSave.aiModel = readModelSelect(modelSelect, modelCustom);
+
+  // Fallbacks: non-empty, unique, never the primary.
+  const seen = new Set([toSave.aiModel || PROVIDER_DEFAULTS[provider] || ""]);
+  toSave.fallbackModels = fallbackSelects
+    .map(({ select, custom }) => readModelSelect(select, custom))
+    .filter((m) => m && !seen.has(m) && seen.add(m));
 
   let keysSaved = 0;
   for (const [prov, sk] of Object.entries(storageKeys)) {
@@ -271,9 +278,11 @@ saveProviderBtn.addEventListener("click", () => {
       }
     }
     savedModel = toSave.aiModel;
+    savedFallbacks = [toSave.fallbackModels[0] || "", toSave.fallbackModels[1] || ""];
     showStatus(providerStatus,
       `Saved. Active: ${provider}` +
       (toSave.aiModel ? ` (model: ${toSave.aiModel})` : " (default model)") +
+      (toSave.fallbackModels.length ? ` + ${toSave.fallbackModels.length} fallback(s)` : "") +
       (keysSaved ? ` — ${keysSaved} key${keysSaved > 1 ? "s" : ""} updated.` : "."),
       "success"
     );
@@ -291,49 +300,71 @@ const PROVIDER_DEFAULTS = {
 };
 
 let savedModel = "";
+let savedFallbacks = ["", ""];
+let loadedModels = null; // models from the last ↻ for the current provider
 
-/**
- * Reset the model <select> to its initial state with just the default
- * option.  If `currentModel` is non-empty and not a listed option, add
- * it as a "Current" entry.
- */
+/** Fill a model <select>: first option, fetched models, the saved value if unlisted, then "Custom…". */
+function fillModelSelect(selectEl, customEl, currentValue, firstLabel) {
+  selectEl.innerHTML = "";
+  const first = document.createElement("option");
+  first.value = "";
+  first.textContent = firstLabel;
+  selectEl.appendChild(first);
+
+  const listed = new Set();
+  for (const m of loadedModels || []) {
+    const opt = document.createElement("option");
+    opt.value = m.id;
+    opt.textContent = m.name && m.name !== m.id ? `${m.name}  (${m.id})` : m.id;
+    selectEl.appendChild(opt);
+    listed.add(m.id);
+  }
+  if (currentValue && !listed.has(currentValue)) {
+    const cur = document.createElement("option");
+    cur.value = currentValue;
+    cur.textContent = currentValue;
+    selectEl.appendChild(cur);
+  }
+  const custom = document.createElement("option");
+  custom.value = "__custom__";
+  custom.textContent = "Custom model…";
+  selectEl.appendChild(custom);
+
+  selectEl.value = currentValue || "";
+  customEl.style.display = "none";
+}
+
+function readModelSelect(selectEl, customEl) {
+  return selectEl.value === "__custom__" ? customEl.value.trim() : (selectEl.value || "");
+}
+
+/** (Re)build the primary and fallback selects from the saved values + loaded list. */
 function resetModelSelect(currentModel) {
   const provider = providerSelect.value;
   const defaultId = PROVIDER_DEFAULTS[provider] || "";
-  modelSelect.innerHTML = "";
-
-  // Default option.
-  const defOpt = document.createElement("option");
-  defOpt.value = "";
-  defOpt.textContent = `Default (${defaultId})`;
-  modelSelect.appendChild(defOpt);
-
-  // If a model is saved that isn't the default, show it.
-  if (currentModel && currentModel !== defaultId) {
-    const curOpt = document.createElement("option");
-    curOpt.value = currentModel;
-    curOpt.textContent = currentModel;
-    modelSelect.appendChild(curOpt);
-  }
-
-  // Custom option.
-  const customOpt = document.createElement("option");
-  customOpt.value = "__custom__";
-  customOpt.textContent = "Custom model\u2026";
-  modelSelect.appendChild(customOpt);
-
-  modelSelect.value = currentModel || "";
-  modelCustom.style.display = "none";
-  modelHint.textContent = `Enter an API key above (no need to save first), then click \u21BB to load available models.`;
+  fillModelSelect(modelSelect, modelCustom, currentModel, `Default (${defaultId})`);
+  fallbackSelects.forEach(({ select, custom }, i) => {
+    fillModelSelect(select, custom, savedFallbacks[i] || "", "(no fallback)");
+  });
+  modelHint.textContent = loadedModels
+    ? `${loadedModels.length} models loaded.`
+    : `Enter an API key above (no need to save first), then click ↻ to load available models.`;
 }
 
-// Show/hide custom input when "Custom model…" is selected.
+// Show/hide custom inputs when "Custom model…" is selected.
 modelSelect.addEventListener("change", () => {
   modelCustom.style.display = modelSelect.value === "__custom__" ? "block" : "none";
 });
+fallbackSelects.forEach(({ select, custom }) => {
+  select.addEventListener("change", () => {
+    custom.style.display = select.value === "__custom__" ? "block" : "none";
+  });
+});
 
-// When provider changes, reset model select with the new default.
+// When provider changes, the loaded list belongs to another provider.
 providerSelect.addEventListener("change", () => {
+  loadedModels = null;
+  savedFallbacks = ["", ""];
   resetModelSelect("");
 });
 
@@ -359,7 +390,7 @@ refreshModelsBtn.addEventListener("click", () => {
 });
 
 function doFetchModels(provider, apiKey) {
-  modelHint.textContent = "Fetching models\u2026";
+  modelHint.textContent = "Fetching models…";
   refreshModelsBtn.disabled = true;
 
   chrome.runtime.sendMessage(
@@ -372,38 +403,11 @@ function doFetchModels(provider, apiKey) {
           : "No models returned. Check your API key.";
         return;
       }
-
-      const defaultId = PROVIDER_DEFAULTS[provider] || "";
-      modelSelect.innerHTML = "";
-
-      // Default option.
-      const defOpt = document.createElement("option");
-      defOpt.value = "";
-      defOpt.textContent = `Default (${defaultId})`;
-      modelSelect.appendChild(defOpt);
-
-      // Fetched models.
-      for (const m of res.models) {
-        const opt = document.createElement("option");
-        opt.value = m.id;
-        opt.textContent = m.name !== m.id ? `${m.name}  (${m.id})` : m.id;
-        modelSelect.appendChild(opt);
-      }
-
-      // Custom option.
-      const customOpt = document.createElement("option");
-      customOpt.value = "__custom__";
-      customOpt.textContent = "Custom model\u2026";
-      modelSelect.appendChild(customOpt);
-
-      // Pre-select the saved model, or the default.
-      if (savedModel) {
-        modelSelect.value = savedModel;
-        // If the saved model isn't in the list, fall back to default.
-        if (modelSelect.value !== savedModel) modelSelect.value = "";
-      }
-
-      modelHint.textContent = `${res.models.length} models loaded.`;
+      loadedModels = res.models;
+      // Keep whatever is currently chosen in each select while refilling.
+      const current = readModelSelect(modelSelect, modelCustom) || savedModel;
+      savedFallbacks = fallbackSelects.map(({ select, custom }, i) => readModelSelect(select, custom) || savedFallbacks[i] || "");
+      resetModelSelect(current);
     }
   );
 }
@@ -514,7 +518,8 @@ let lastDiagnostics = null;
 
 function formatDiagnostics(d) {
   const lines = [
-    `Kids Guard v${d.version} — provider: ${d.provider || "(none yet)"} / model: ${d.model || "(default)"}`,
+    `Kids Guard v${d.version} — provider: ${d.provider || "(none yet)"} / model: ${d.model || "(default)"}` +
+      (d.fallbackModels && d.fallbackModels.length ? ` / fallbacks: ${d.fallbackModels.join(", ")}` : ""),
     `cache: ${d.cacheSize} decisions · in flight: ${d.inFlight} · queued: ${d.queued}`,
     "",
   ];

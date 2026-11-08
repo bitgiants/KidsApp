@@ -302,7 +302,7 @@ function rateLimitDelayMs(retryAfterHeader, bodyText, attempt) {
   return Math.min(RETRY_DELAY_MS * 2 ** attempt, RATE_LIMIT_MAX_DELAY_MS); // 3 s, 6 s, 12 s
 }
 
-async function fetchWithRetry(url, options, retries = 2) {
+async function fetchWithRetry(url, options, retries = 2, rateLimitRetries = RATE_LIMIT_MAX_RETRIES) {
   let attempt = 0;
   for (;;) {
     let response;
@@ -316,12 +316,12 @@ async function fetchWithRetry(url, options, retries = 2) {
       await sleep(delay);
       continue;
     }
-    if (response.status === 429 && attempt < RATE_LIMIT_MAX_RETRIES) {
+    if (response.status === 429 && attempt < rateLimitRetries) {
       attempt++;
       let body = "";
       try { body = await response.clone().text(); } catch { /* no body */ }
       const delay = rateLimitDelayMs(response.headers?.get?.("retry-after"), body, attempt);
-      warn(`API 429 (rate limited); waiting ${delay}ms before retry ${attempt}/${RATE_LIMIT_MAX_RETRIES}`);
+      warn(`API 429 (rate limited); waiting ${delay}ms before retry ${attempt}/${rateLimitRetries}`);
       await sleep(delay);
       continue;
     }
@@ -345,6 +345,7 @@ async function getSettings() {
   const data = await chrome.storage.local.get([
     "aiProvider",
     "aiModel",
+    "fallbackModels",
     "geminiApiKey",
     "openaiApiKey",
     "anthropicApiKey",
@@ -369,7 +370,11 @@ async function getSettings() {
   }
 
   const model = data.aiModel || providerDef.defaultModel;
-  lastSettingsSummary = { provider, model };
+  const fallbackModels = (Array.isArray(data.fallbackModels) ? data.fallbackModels : [])
+    .map((m) => (typeof m === "string" ? m.trim() : ""))
+    .filter((m, i, arr) => m && m !== model && arr.indexOf(m) === i)
+    .slice(0, 2);
+  lastSettingsSummary = { provider, model, fallbackModels };
 
   // Blocked categories: merge defaults with user overrides.
   let blockedCategories;
@@ -388,7 +393,7 @@ async function getSettings() {
   const ageRange = typeof data.ageRange === "string" ? data.ageRange.trim() : "";
 
   return {
-    provider, providerDef, apiKey, model, blockedCategories,
+    provider, providerDef, apiKey, model, fallbackModels, blockedCategories,
     whitelist, blacklist, customPrompt, useTranscript, ageRange,
   };
 }
@@ -631,7 +636,7 @@ function parseAIResponse(rawText) {
 
 // ─── Provider: Google Gemini ─────────────────────────────────────────
 
-async function queryGemini(apiKey, model, userPrompt, systemPrompt) {
+async function queryGemini(apiKey, model, userPrompt, systemPrompt, requestOpts = {}) {
   const endpoint =
     `https://generativelanguage.googleapis.com/v1beta/models/` +
     `${model}:generateContent?key=${apiKey}`;
@@ -652,7 +657,7 @@ async function queryGemini(apiKey, model, userPrompt, systemPrompt) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
-  });
+  }, 2, requestOpts.rateLimitRetries);
 
   if (!response.ok) {
     const errorText = await response.text();
@@ -689,7 +694,7 @@ function geminiVerdict(data, model) {
  * headers or response-format hints without duplicating the request code.
  */
 function queryOpenAICompatible(endpoint, extraHeaders = {}, extraBody = {}) {
-  return async function (apiKey, model, userPrompt, systemPrompt) {
+  return async function (apiKey, model, userPrompt, systemPrompt, requestOpts = {}) {
     log(`[${endpoint}/${model}] Sending prompt`);
 
     const body = {
@@ -711,7 +716,7 @@ function queryOpenAICompatible(endpoint, extraHeaders = {}, extraBody = {}) {
         ...extraHeaders,
       },
       body: JSON.stringify(body),
-    });
+    }, 2, requestOpts.rateLimitRetries);
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -756,7 +761,7 @@ function supportsEffort(model) {
   return major >= 5 || (major === 4 && minor >= 6);
 }
 
-async function queryAnthropic(apiKey, model, userPrompt, systemPrompt) {
+async function queryAnthropic(apiKey, model, userPrompt, systemPrompt, requestOpts = {}) {
   log(`[Anthropic/${model}] Sending prompt`);
 
   // Current Claude models (Haiku/Sonnet/Opus 5.5 and later):
@@ -783,7 +788,7 @@ async function queryAnthropic(apiKey, model, userPrompt, systemPrompt) {
       ...ANTHROPIC_HEADERS_BASE,
     },
     body: JSON.stringify(body),
-  });
+  }, 2, requestOpts.rateLimitRetries);
 
   if (!response.ok) {
     const errorText = await response.text();
@@ -929,7 +934,7 @@ async function evaluateUncached(payload) {
       settings.blockedCategories, settings.customPrompt, settings.ageRange
     );
     const userPrompt = buildUserPrompt(payload);
-    const { decision, reason } = await queryProviderWithRetry(
+    const { decision, reason } = await queryModelChain(
       settings, userPrompt, systemPrompt, videoId
     );
 
@@ -946,22 +951,54 @@ async function evaluateUncached(payload) {
 const PROVIDER_RETRY_DELAY_MS = 2000;
 
 /**
- * One more attempt on transient failures (malformed/empty replies, a 429
- * or 5xx that outlived fetchWithRetry, network blips).  Never on auth
- * errors — a bad key won't fix itself.
+ * Try the primary model, then each fallback model in order.
+ *  - Auth errors (401/403) stop at once: the key is the same for all.
+ *  - While a fallback is still available, a rate-limited model gets only
+ *    one short wait before we move on; the LAST model in the chain gets
+ *    the full patient budget plus one "JSON only" retry on an unreadable
+ *    reply.
+ *  - When a fallback answered, that is recorded in Diagnostics so the
+ *    parent can see the primary model misbehaving.
  */
-async function queryProviderWithRetry(settings, userPrompt, systemPrompt, videoId) {
+async function queryModelChain(settings, userPrompt, systemPrompt, videoId) {
+  const chain = [settings.model, ...(settings.fallbackModels || [])];
+  let lastErr = null;
+  for (let i = 0; i < chain.length; i++) {
+    const model = chain[i];
+    const isLast = i === chain.length - 1;
+    const requestOpts = { rateLimitRetries: isLast ? RATE_LIMIT_MAX_RETRIES : 1 };
+    try {
+      const verdict = await queryOnce(settings, model, userPrompt, systemPrompt, requestOpts, isLast, videoId);
+      if (i > 0) {
+        log(`Fallback model ${model} answered for ${videoId}`);
+        recordFailure({
+          videoId, kind: "fallback", model,
+          message: `Primary model ${chain[0]} failed (${lastErr ? lastErr.message : "?"}); answered by fallback ${model}`,
+        });
+      }
+      return verdict;
+    } catch (err) {
+      lastErr = err;
+      if (/\b(401|403)\b/.test(err.message)) throw err;
+      if (!isLast) warn(`Model ${model} failed for ${videoId} (${err.message}); trying ${chain[i + 1]}`);
+    }
+  }
+  throw lastErr;
+}
+
+/** One model: a single call, plus (when allowed) one "JSON only" retry on transient failure. */
+async function queryOnce(settings, model, userPrompt, systemPrompt, requestOpts, allowRetry, videoId) {
   try {
     return await settings.providerDef.query(
-      settings.apiKey, settings.model, userPrompt, systemPrompt
+      settings.apiKey, model, userPrompt, systemPrompt, requestOpts
     );
   } catch (err) {
-    if (/\b(401|403|429)\b/.test(err.message)) throw err;
+    if (!allowRetry || /\b(401|403|429)\b/.test(err.message)) throw err;
     warn(`Provider call for ${videoId} failed (${err.message}); retrying once`);
     await sleep(PROVIDER_RETRY_DELAY_MS);
     const stricter = `${userPrompt}\n\nReply with the JSON object only.`;
     return settings.providerDef.query(
-      settings.apiKey, settings.model, stricter, systemPrompt
+      settings.apiKey, model, stricter, systemPrompt, requestOpts
     );
   }
 }
@@ -1153,7 +1190,7 @@ function classifyError(err) {
 }
 
 const MAX_RECENT_FAILURES = 25;
-let lastSettingsSummary = { provider: null, model: null };
+let lastSettingsSummary = { provider: null, model: null, fallbackModels: [] };
 
 async function recordFailure(entry) {
   if (!hasStorage()) return;
@@ -1316,6 +1353,8 @@ if (typeof module !== "undefined" && module.exports) {
     SAFETY_FILTER_REASON,
     classifyError,
     rateLimitDelayMs,
+    queryModelChain,
+    RATE_LIMIT_MAX_RETRIES,
     RATE_LIMIT_MAX_DELAY_MS,
     decodeEntities,
     normalizeChannel,
