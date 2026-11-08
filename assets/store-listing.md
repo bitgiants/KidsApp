@@ -89,18 +89,30 @@ Crop or blur anything personal (account avatar, email) before uploading.
 
 > Kids Guard for YouTube filters YouTube for children: it pauses each video, has the AI provider chosen by the parent classify it as suitable or not, blocks unsuitable videos and all YouTube Shorts, and lets parents manage approved / blocked channels and recommended alternatives behind a PIN.
 
-**Permission justifications:**
+**Permission justifications** — the dashboard has ONE box for `storage` and ONE box for all host
+permissions together (1,000 characters each):
 
-| Permission | Justification |
-|---|---|
-| `storage` | Stores the parent's settings on the device: provider choice and API keys, PIN (hashed), category toggles, age range, custom instructions, approved/blocked channels, recommended videos, the 24-hour decision cache and the diagnostics log. |
-| Host `https://www.youtube.com/*` | The extension runs on YouTube pages to pause the player, read the public title/channel/description of the video on screen, show the block/allow screens and thumbnail badges, and fetch the public watch page and captions of the video being checked. |
-| Host `https://generativelanguage.googleapis.com/*` | Calls the Google Gemini API with the parent's own key to classify a video, and to list available models in Settings. Only used when Gemini is the selected provider. |
-| Host `https://api.openai.com/*` | Calls the OpenAI API with the parent's own key to classify a video, and to list available models. Only used when OpenAI is the selected provider. |
-| Host `https://api.anthropic.com/*` | Calls the Anthropic API with the parent's own key to classify a video, and to list available models. Only used when Anthropic is the selected provider. |
-| Host `https://openrouter.ai/*` | Calls the OpenRouter API with the parent's own key to classify a video, and to list available models. Only used when OpenRouter is the selected provider. |
+`storage justification`:
 
-**Are you using remote code?** No. All code ships inside the package; the extension only exchanges JSON data with the AI provider APIs.
+```
+Stores the parent's settings on the user's device only: the chosen AI provider and the parent's own API keys, the parent PIN (stored as a SHA-256 hash, never in clear text), blocked-category toggles, the child's age range, optional custom filtering instructions, approved and blocked channel lists, recommended videos and channels, a 24-hour cache of allow/block decisions so the same video is not re-checked, and a short log of failed checks for troubleshooting. Nothing in storage is synced or sent to the developer.
+```
+
+`Host permission justification`:
+
+```
+The extension's single purpose is to check each YouTube video for a child before it plays and block unsuitable ones.
+
+https://www.youtube.com/* — the content script runs on YouTube pages to pause the player, read the public title, channel and description of the video on screen, show the block/allow screens and thumbnail badges, and fetch the public watch page and captions of the video being checked.
+
+https://generativelanguage.googleapis.com/*, https://api.openai.com/*, https://api.anthropic.com/*, https://openrouter.ai/* — the parent chooses ONE AI provider in Settings and enters their own API key. The extension calls that provider's API to classify the video and to list its available models. Only the provider the parent configured is ever contacted, and only public information about the video is sent. No other hosts are accessed and no user or child data is collected.
+```
+
+**Are you using remote code?** Select **No, I am not using remote code** (the "Justification" box
+underneath is only for "Yes"). All JavaScript ships inside the package; the extension only exchanges
+JSON data with the AI provider APIs, which Chrome does not count as remote code. The yellow
+"in-depth review" notice about host permissions is informational — expected for any extension that
+runs on youtube.com.
 
 **Data usage — what the extension collects** (tick these):
 
