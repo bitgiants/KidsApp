@@ -22,7 +22,9 @@ KidsApp/
 │                          #   prompt, age range, transcript toggle, lists, import/export
 ├── popup.html / .js       # Toolbar popup: on/off toggle (PIN required to turn off)
 ├── icons/                 # Extension icons (16/48/128 PNG, rendered from assets/icon.svg)
-├── assets/                # Icon source SVG + Chrome Web Store listing art (not shipped in the zip)
+├── assets/                # Icon source SVG, store art (promo tile, marquee) and store-listing.md —
+│                          #   the Chrome Web Store copy, permission justifications and checklist
+├── PRIVACY.md             # Privacy policy; published as a public gist and linked from the store listing
 ├── scripts/
 │   ├── validate-setup.js  # `npm run setup` sanity checks
 │   └── package.js         # `npm run package` → dist/kids-guard-for-youtube.zip (no deps)
