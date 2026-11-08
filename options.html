@@ -344,6 +344,22 @@
       </div>
     </div>
 
+    <!-- Diagnostics -->
+    <div class="card">
+      <h2>Diagnostics</h2>
+      <p class="hint">
+        When a video "could not be checked", the real reason (provider, status, message) is recorded here.
+        Click <strong>Copy diagnostics</strong> and paste the result when reporting a problem.
+      </p>
+      <div class="btn-row">
+        <button class="btn-outline" id="refreshDiagBtn">Refresh</button>
+        <button class="btn-outline" id="copyDiagBtn">Copy diagnostics</button>
+        <button class="btn-clear" id="clearDiagBtn">Clear</button>
+      </div>
+      <pre id="diagOut" style="margin-top:0.75rem;font-size:0.78rem;line-height:1.45;background:#fafafa;border:1px solid #e8e8e8;border-radius:6px;padding:0.75rem;max-height:280px;overflow:auto;white-space:pre-wrap;word-break:break-word;"></pre>
+      <p class="status" id="diagStatus"></p>
+    </div>
+
     <!-- Recommended alternatives -->
     <div class="card">
       <h2>Recommended Videos &amp; Channels</h2>

@@ -285,6 +285,23 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Rate limits get their own, more patient budget: the provider tells us
+// how long to wait (Retry-After header, or a "retry in Ns" hint in the
+// body as Gemini does), and we'd rather wait than fail the check.
+const RATE_LIMIT_MAX_RETRIES = 3;
+const RATE_LIMIT_MAX_DELAY_MS = 30000;
+
+/** Milliseconds to wait after a 429, from the provider's hints or backoff. */
+function rateLimitDelayMs(retryAfterHeader, bodyText, attempt) {
+  const header = Number(retryAfterHeader);
+  if (header > 0) return Math.min(header * 1000, RATE_LIMIT_MAX_DELAY_MS);
+  const m = /retry(?:Delay|\s+in|\s+after)["\s:]*([0-9.]+)\s*s/i.exec(String(bodyText || ""));
+  if (m && Number(m[1]) > 0) {
+    return Math.min(Math.ceil(Number(m[1]) * 1000) + 500, RATE_LIMIT_MAX_DELAY_MS);
+  }
+  return Math.min(RETRY_DELAY_MS * 2 ** attempt, RATE_LIMIT_MAX_DELAY_MS); // 3 s, 6 s, 12 s
+}
+
 async function fetchWithRetry(url, options, retries = 2) {
   let attempt = 0;
   for (;;) {
@@ -299,8 +316,16 @@ async function fetchWithRetry(url, options, retries = 2) {
       await sleep(delay);
       continue;
     }
-    const retryable = response.status === 429 || response.status >= 500;
-    if (retryable && attempt < retries) {
+    if (response.status === 429 && attempt < RATE_LIMIT_MAX_RETRIES) {
+      attempt++;
+      let body = "";
+      try { body = await response.clone().text(); } catch { /* no body */ }
+      const delay = rateLimitDelayMs(response.headers?.get?.("retry-after"), body, attempt);
+      warn(`API 429 (rate limited); waiting ${delay}ms before retry ${attempt}/${RATE_LIMIT_MAX_RETRIES}`);
+      await sleep(delay);
+      continue;
+    }
+    if (response.status >= 500 && attempt < retries) {
       attempt++;
       const retryAfter = Number(response.headers?.get?.("retry-after"));
       const delay = retryAfter > 0
@@ -344,6 +369,7 @@ async function getSettings() {
   }
 
   const model = data.aiModel || providerDef.defaultModel;
+  lastSettingsSummary = { provider, model };
 
   // Blocked categories: merge defaults with user overrides.
   let blockedCategories;
@@ -930,7 +956,7 @@ async function queryProviderWithRetry(settings, userPrompt, systemPrompt, videoI
       settings.apiKey, settings.model, userPrompt, systemPrompt
     );
   } catch (err) {
-    if (/\b(401|403)\b/.test(err.message)) throw err;
+    if (/\b(401|403|429)\b/.test(err.message)) throw err;
     warn(`Provider call for ${videoId} failed (${err.message}); retrying once`);
     await sleep(PROVIDER_RETRY_DELAY_MS);
     const stricter = `${userPrompt}\n\nReply with the JSON object only.`;
@@ -1095,6 +1121,73 @@ function getAnthropicFallbackModels() {
   ];
 }
 
+// ─── Failure classification & diagnostics ───────────────────────────
+// A failed check is NOT the same as a video judged unsuitable.  The child
+// sees a kid-safe sentence that says what to do; the parent can read the
+// underlying cause in Options → Diagnostics without opening DevTools.
+
+function classifyError(err) {
+  const msg = String((err && err.message) || err || "");
+  if (/\b429\b|RESOURCE_EXHAUSTED|rate.?limit|quota/i.test(msg)) {
+    return { kind: "rate_limit", retryable: true,
+      reason: "The AI service is busy right now — please wait a moment and try again." };
+  }
+  if (/\b(401|403)\b|No API key|api key/i.test(msg)) {
+    return { kind: "auth", retryable: false,
+      reason: "The AI service rejected the API key — a parent needs to check the extension settings." };
+  }
+  if (/Failed to fetch|NetworkError|network|ECONN|timed? ?out/i.test(msg)) {
+    return { kind: "network", retryable: true,
+      reason: "Could not reach the AI service — please check the internet connection and try again." };
+  }
+  if (/Failed to parse|Unexpected decision|empty response|Unexpected AI JSON/i.test(msg)) {
+    return { kind: "bad_reply", retryable: true,
+      reason: "The AI gave an unreadable answer — please try again." };
+  }
+  if (/\b5\d\d\b/.test(msg)) {
+    return { kind: "server", retryable: true,
+      reason: "The AI service had a problem — please try again." };
+  }
+  return { kind: "unknown", retryable: true,
+    reason: "The safety check could not be completed — please try again." };
+}
+
+const MAX_RECENT_FAILURES = 25;
+let lastSettingsSummary = { provider: null, model: null };
+
+async function recordFailure(entry) {
+  if (!hasStorage()) return;
+  try {
+    const { recentFailures } = await chrome.storage.local.get("recentFailures");
+    const list = Array.isArray(recentFailures) ? recentFailures : [];
+    list.push({
+      t: Date.now(),
+      ...lastSettingsSummary,
+      ...entry,
+      message: String(entry.message || "").slice(0, 300),
+    });
+    while (list.length > MAX_RECENT_FAILURES) list.shift();
+    await chrome.storage.local.set({ recentFailures: list });
+  } catch (e) {
+    warn("Could not record failure:", e.message);
+  }
+}
+
+async function getDiagnostics() {
+  let version = "?";
+  try { version = chrome.runtime.getManifest().version; } catch { /* tests */ }
+  const { recentFailures } = hasStorage() ? await chrome.storage.local.get("recentFailures") : {};
+  return {
+    version,
+    ...lastSettingsSummary,
+    cacheSize: cache.size,
+    inFlight: inFlight.size,
+    queued: evaluationQueue.length,
+    active: activeEvaluations,
+    recentFailures: Array.isArray(recentFailures) ? recentFailures : [],
+  };
+}
+
 // ─── Message listener ────────────────────────────────────────────────
 
 if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
@@ -1107,11 +1200,10 @@ if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
           sendResponse(result);
         })
         .catch((err) => {
-          error("Evaluation failed:", err.message, err.stack);
-          sendResponse({
-            blocked: true,
-            reason: "Safety check unavailable — video blocked as a precaution.",
-          });
+          const info = classifyError(err);
+          error(`Evaluation failed [${info.kind}]:`, err.message, err.stack);
+          recordFailure({ videoId: message.payload?.videoId, source: message.payload?.source, kind: info.kind, message: err.message });
+          sendResponse({ blocked: true, reason: info.reason, retryable: info.retryable, kind: info.kind });
         });
       return true;
     }
@@ -1148,6 +1240,18 @@ if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
 
     if (message.type === "CLEAR_PIN") {
       clearPin().then((result) => sendResponse(result));
+      return true;
+    }
+
+    if (message.type === "GET_DIAGNOSTICS") {
+      getDiagnostics().then(sendResponse).catch((err) => sendResponse({ error: err.message }));
+      return true;
+    }
+
+    if (message.type === "CLEAR_DIAGNOSTICS") {
+      Promise.resolve(hasStorage() ? chrome.storage.local.remove("recentFailures") : null)
+        .then(() => sendResponse({ ok: true }))
+        .catch((err) => sendResponse({ ok: false, error: err.message }));
       return true;
     }
 
@@ -1210,6 +1314,9 @@ if (typeof module !== "undefined" && module.exports) {
     geminiVerdict,
     openAIVerdict,
     SAFETY_FILTER_REASON,
+    classifyError,
+    rateLimitDelayMs,
+    RATE_LIMIT_MAX_DELAY_MS,
     decodeEntities,
     normalizeChannel,
     isChannelInList,

@@ -73,6 +73,9 @@
   // closed on the first hiccup, retry a few times — a child would rather
   // wait ten more seconds than be told a video "could not be checked".
   const CHECK_RETRY_DELAYS_MS = [1500, 3000, 5000];
+  // When the background answers "could not check" (rate limit, outage,
+  // unreadable reply) retry once by ourselves before asking the child.
+  const AUTO_RETRY_DELAY_MS = 5000;
 
   function sendCheckVideo(payload, callback, attempt = 0) {
     let settled = false;
@@ -1073,34 +1076,51 @@
         return;
       }
 
-      sendCheckVideo(payload, (response, failure) => {
-          // The user may have moved on while we waited.  A late verdict
-          // for the OLD video must never touch the overlay of the new one.
-          if (lastCheckedVideoId !== videoId) {
-            log("Ignoring late verdict for", videoId);
+      let autoRetries = 0;
+      const handleVerdict = (response, failure) => {
+        // The user may have moved on while we waited.  A late verdict
+        // for the OLD video must never touch the overlay of the new one.
+        if (lastCheckedVideoId !== videoId) {
+          log("Ignoring late verdict for", videoId);
+          return;
+        }
+
+        if (!response) {
+          error("Check failed after retries:", failure);
+          const reason = "The safety check did not complete — the video stays blocked. You can try again.";
+          lastVerdict = { videoId, blocked: true, reason };
+          showBlockedOverlay(reason, { retry: true });
+          return;
+        }
+
+        if (response.blocked && response.retryable) {
+          if (autoRetries < 1) {
+            autoRetries++;
+            warn(`Check for ${videoId} failed (${response.kind || "unknown"}); retrying automatically in ${AUTO_RETRY_DELAY_MS}ms`);
+            setTimeout(() => {
+              if (lastCheckedVideoId === videoId) sendCheckVideo(payload, handleVerdict);
+            }, AUTO_RETRY_DELAY_MS);
             return;
           }
+          log("BLOCKED (check failed):", response.kind, "—", response.reason);
+          lastVerdict = { videoId, blocked: true, reason: response.reason };
+          showBlockedOverlay(response.reason, { retry: true });
+          return;
+        }
 
-          if (!response) {
-            error("Check failed after retries:", failure);
-            const reason = "The safety check did not complete — the video stays blocked. You can try again.";
-            lastVerdict = { videoId, blocked: true, reason };
-            showBlockedOverlay(reason, { retry: true });
-            return;
-          }
-
-          if (response.blocked) {
-            log("BLOCKED:", response.reason);
-            lastVerdict = { videoId, blocked: true, reason: response.reason };
-            showBlockedOverlay(response.reason);
-          } else {
-            log("ALLOWED:", response?.reason);
-            lastVerdict = { videoId, blocked: false, reason: response?.reason || "" };
-            const target = activeVideoEl || videoEl;
-            removeOverlay();
-            target.play();
-          }
-      });
+        if (response.blocked) {
+          log("BLOCKED:", response.reason);
+          lastVerdict = { videoId, blocked: true, reason: response.reason };
+          showBlockedOverlay(response.reason);
+        } else {
+          log("ALLOWED:", response.reason);
+          lastVerdict = { videoId, blocked: false, reason: response.reason || "" };
+          const target = activeVideoEl || videoEl;
+          removeOverlay();
+          target.play();
+        }
+      };
+      sendCheckVideo(payload, handleVerdict);
     });
   }
 
@@ -1207,7 +1227,15 @@
   let lastHandledHref = window.location.href;
 
   function handleNavigation() {
-    lastHandledHref = window.location.href;
+    const href = window.location.href;
+    // The 500 ms URL poll usually notices a navigation before YouTube
+    // fires yt-navigate-finish for it; whichever comes second must not run
+    // the check again (every CHECK_VIDEO was being sent twice).
+    if (href === lastHandledHref) {
+      log("Navigation already handled:", href);
+      return;
+    }
+    lastHandledHref = href;
     if (!guardEnabled) return;
 
     // Check if we navigated to a blacklisted channel page.
@@ -1496,6 +1524,7 @@
         thumbChecked.set(videoId, { state, reason });
         log("Thumb result:", videoId, state, reason);
         updateAllCardsForVideo(videoId);
+        if (response.blocked && response.retryable) scheduleThumbRecheck(videoId);
       }
     );
   }
@@ -1519,6 +1548,20 @@
    * Scan all visible thumbnail cards on the page.
    * Called on initial load, SPA navigation, and DOM mutations.
    */
+  // A thumbnail whose check FAILED (not "was judged bad") gets another
+  // chance later, instead of staying ✗ for the rest of the session.
+  const THUMB_RECHECK_DELAY_MS = 30000;
+  function scheduleThumbRecheck(videoId) {
+    setTimeout(() => {
+      if (!guardEnabled) return;
+      thumbChecked.delete(videoId);
+      document.querySelectorAll(`[data-ytkg-checked="${CSS.escape(videoId)}"]`).forEach((el) => {
+        delete el.dataset.ytkgChecked;
+      });
+      scanThumbnails();
+    }, THUMB_RECHECK_DELAY_MS);
+  }
+
   function scanThumbnails() {
     const cards = document.querySelectorAll(THUMB_CARD_SELECTORS);
     for (const card of cards) {

@@ -12,6 +12,9 @@ const {
   geminiVerdict,
   openAIVerdict,
   SAFETY_FILTER_REASON,
+  classifyError,
+  rateLimitDelayMs,
+  RATE_LIMIT_MAX_DELAY_MS,
   normalizeChannel,
   isChannelInList,
   isValidVideoId,
@@ -519,5 +522,43 @@ describe("provider verdicts", () => {
     expect(openAIVerdict({ choices: [{ finish_reason: "stop", message: { content: '{"decision":"BLOCK","reason":"x"}' } }] }, "m"))
       .toEqual({ decision: "BLOCK", reason: "x" });
     expect(() => openAIVerdict({ choices: [] }, "m")).toThrow("empty response");
+  });
+});
+
+// ─── Failure classification & rate-limit waits ──────────────────────
+
+describe("classifyError", () => {
+  test("maps provider failures to kid-safe, retryable categories", () => {
+    expect(classifyError(new Error("Gemini API 429: RESOURCE_EXHAUSTED"))).toMatchObject({ kind: "rate_limit", retryable: true });
+    expect(classifyError(new Error("Anthropic API 401: invalid x-api-key"))).toMatchObject({ kind: "auth", retryable: false });
+    expect(classifyError(new Error("No API key configured for OpenAI."))).toMatchObject({ kind: "auth" });
+    expect(classifyError(new Error("Failed to fetch"))).toMatchObject({ kind: "network", retryable: true });
+    expect(classifyError(new Error('Failed to parse AI JSON — raw response: "hmm"'))).toMatchObject({ kind: "bad_reply", retryable: true });
+    expect(classifyError(new Error("API 503: overloaded"))).toMatchObject({ kind: "server", retryable: true });
+    expect(classifyError(new Error("something odd"))).toMatchObject({ kind: "unknown", retryable: true });
+  });
+
+  test("never leaks the raw error into the child-facing reason", () => {
+    const r = classifyError(new Error("Gemini API 429: {secret-ish body}"));
+    expect(r.reason).not.toMatch(/429|secret/);
+  });
+});
+
+describe("rateLimitDelayMs", () => {
+  test("prefers the Retry-After header", () => {
+    expect(rateLimitDelayMs("2", "", 1)).toBe(2000);
+  });
+
+  test("reads Gemini's retryDelay / 'retry in Ns' hints from the body", () => {
+    expect(rateLimitDelayMs(null, '{"error":{"details":[{"retryDelay":"23s"}]}}', 1)).toBe(23500);
+    expect(rateLimitDelayMs(undefined, "You exceeded your quota. Please retry in 1.2s.", 1)).toBe(1700);
+  });
+
+  test("falls back to growing backoff and caps every wait", () => {
+    expect(rateLimitDelayMs(null, "", 1)).toBe(3000);
+    expect(rateLimitDelayMs(null, "", 2)).toBe(6000);
+    expect(rateLimitDelayMs(null, "", 3)).toBe(12000);
+    expect(rateLimitDelayMs("999", "", 1)).toBe(RATE_LIMIT_MAX_DELAY_MS);
+    expect(rateLimitDelayMs(null, '{"retryDelay":"600s"}', 1)).toBe(RATE_LIMIT_MAX_DELAY_MS);
   });
 });
