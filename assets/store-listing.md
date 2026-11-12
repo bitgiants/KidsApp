@@ -1,4 +1,4 @@
-# Chrome Web Store listing — Kids Guard for YouTube
+# Chrome Web Store listing — KindTube
 
 Everything to paste into the Developer Dashboard, field by field. Keep this file in sync with
 `manifest.json` (name / version / summary) when the listing changes.
@@ -7,13 +7,13 @@ Everything to paste into the Developer Dashboard, field by field. Keep this file
 
 ## 1. Package
 
-- Upload `dist/kids-guard-for-youtube.zip` (`npm run package`). The dashboard reads **name**, **version**
+- Upload `dist/kindtube.zip` (`npm run package`). The dashboard reads **name**, **version**
   and **summary** from the manifest.
 - Every new upload needs a higher version number.
 
 ## 2. Store listing tab
 
-**Title** (from manifest): `Kids Guard for YouTube`
+**Title** (from manifest): `KindTube – AI Parental Filter for YouTube` (short name `KindTube`)
 
 **Summary** (from manifest, 125/132 chars):
 
@@ -22,7 +22,9 @@ Everything to paste into the Developer Dashboard, field by field. Keep this file
 **Detailed description** (plain text; the dashboard does not render Markdown):
 
 ```
-Kids Guard for YouTube turns regular YouTube into a safer place for children — and you stay in control.
+KindTube turns regular YouTube into a safer place for children — and you stay in control.
+
+KindTube is the kind YouTube: every video is checked before it plays, by the AI you choose, with your own key.
 
 HOW IT WORKS
 Every video is paused the moment it opens. Its title, channel, description and (when available) subtitles are checked by an AI model you choose — Google Gemini, OpenAI, Anthropic Claude, or any model on OpenRouter — using your own API key. Only videos that pass will play. Blocked videos show a clear, kid-friendly screen explaining why, plus a green panel of parent-approved alternatives ("Try one of these instead"). YouTube Shorts are blocked entirely, and the Shorts shelf and menu entry are hidden.
@@ -33,12 +35,17 @@ BROWSE SAFELY TOO
 Thumbnails on the Home page, search results and sidebar get a ✓ or ✗ badge, and hover-to-preview is disabled until a video is approved, so nothing autoplays behind your back.
 
 MADE FOR PARENTS
+• Two modes: let the AI check every video (ages 8+), or "Allow only approved channels" for young children — nothing is sent to the AI at all.
 • Choose the child's age range and which categories to block: pranks & challenges, reaction and unboxing videos, non-educational gaming, vlogs, memes, horror, drama, toy consumerism, news & politics, and more.
-• Approved channels are never sent to the AI; mark the ones you trust completely as "Trusted — play instantly".
+• Approved channels are never sent to the AI; mark the ones you trust completely as "Trusted — play instantly". Add a channel by @handle, by name, or just by pasting any video URL.
+• "Ask a parent" right on the block screen: enter your PIN to play that one video or approve the channel on the spot.
+• A "Recently blocked" list in Settings shows what your child tried to open and why, with one-click Approve / Allow / Block.
 • Always-block channels.
 • Recommended videos and channels that appear on every block screen.
+• Screen time: set a daily watch limit (only real playback counts) and schedules such as homework hours or bedtime. Children see a friendly "Time's up" / "YouTube is taking a break" screen with your own list of offline ideas, and a parent can add 15 minutes with the PIN.
+• "This Week" in Settings: a simple chart of allowed and blocked videos and minutes watched per day, plus the most-blocked channels. The toolbar icon shows today's number of blocked videos, and the popup shows today's counts and watch time at a glance.
 • Edit the AI's instructions if you want to fine-tune the filter.
-• Everything — including the on/off switch — is locked behind a 4-digit parent PIN.
+• Everything — including the on/off switch — is locked behind a parent PIN or passphrase, with a one-time recovery code in case you forget it.
 • Import/export your settings to set up another computer in seconds.
 
 RELIABLE
@@ -79,7 +86,7 @@ Screenshots must show the real extension in use (no mock-ups). Set the Chrome wi
 2. The wait screen: "One moment, please!"
 3. The YouTube Home page with ✓ / ✗ badges on thumbnails.
 4. Settings → AI Provider card: provider, model, fallback models.
-5. Settings → Whitelisted Channels (with a "Trusted — play instantly" tick) and Recommended Videos & Channels.
+5. Settings → Screen Time (daily limit + a schedule) and the "This Week" chart — or the "Time's up for today!" screen.
 
 Crop or blur anything personal (account avatar, email) before uploading.
 
@@ -87,7 +94,7 @@ Crop or blur anything personal (account avatar, email) before uploading.
 
 **Single purpose description:**
 
-> Kids Guard for YouTube filters YouTube for children: it pauses each video, has the AI provider chosen by the parent classify it as suitable or not, blocks unsuitable videos and all YouTube Shorts, and lets parents manage approved / blocked channels and recommended alternatives behind a PIN.
+> KindTube filters YouTube for children: it pauses each video, has the AI provider chosen by the parent classify it as suitable or not, blocks unsuitable videos and all YouTube Shorts, and lets parents manage approved / blocked channels and recommended alternatives behind a PIN.
 
 **Permission justifications** — the dashboard has ONE box for `storage` and ONE box for all host
 permissions together (1,000 characters each):

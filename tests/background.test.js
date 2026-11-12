@@ -17,6 +17,19 @@ const {
   RATE_LIMIT_MAX_DELAY_MS,
   queryModelChain,
   RATE_LIMIT_MAX_RETRIES,
+  isValidPin,
+  PIN_MIN_LEN,
+  PIN_MAX_LEN,
+  generateRecoveryCode,
+  normalizeRecoveryCode,
+  formatRecoveryCode,
+  parseChannelInput,
+  extractHandleFromHtml,
+  withMeta,
+  dayKey,
+  parseHHMM,
+  getActiveScheduleBlock,
+  computeLimitStatus,
   normalizeChannel,
   isChannelInList,
   isValidVideoId,
@@ -622,5 +635,129 @@ describe("queryModelChain", () => {
     await expect(pending).resolves.toEqual(OK);
     expect(query).toHaveBeenCalledTimes(2);
     expect(query.mock.calls[1][2]).toMatch(/Reply with the JSON object only/);
+  });
+});
+
+// ─── PIN rules & recovery codes ──────────────────────────────────────
+
+describe("PIN rules", () => {
+  test("accepts 4–12 non-space characters, rejects the rest", () => {
+    expect(isValidPin("1234")).toBe(true);
+    expect(isValidPin("correct-horse")).toBe(false); // 13 chars
+    expect(isValidPin("sunny day")).toBe(false);     // space
+    expect(isValidPin("abc")).toBe(false);
+    expect(isValidPin("a".repeat(PIN_MAX_LEN))).toBe(true);
+    expect(isValidPin("a".repeat(PIN_MIN_LEN - 1))).toBe(false);
+    expect(isValidPin(1234)).toBe(false);
+  });
+});
+
+describe("recovery codes", () => {
+  test("are 12 unambiguous characters in XXXX-XXXX-XXXX form, and unique", () => {
+    const a = generateRecoveryCode();
+    const b = generateRecoveryCode();
+    expect(a).toMatch(/^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}-[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}-[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}$/);
+    expect(a).not.toBe(b);
+  });
+
+  test("normalise what a parent types back to the stored form", () => {
+    expect(normalizeRecoveryCode(" abcd-efgh 2345 ")).toBe("ABCDEFGH2345");
+    expect(formatRecoveryCode("abcdefgh2345")).toBe("ABCD-EFGH-2345");
+  });
+});
+
+// ─── Channel input parsing ───────────────────────────────────────────
+
+describe("parseChannelInput", () => {
+  test("handles, handle URLs, video URLs, youtu.be, Shorts, channel URLs", () => {
+    expect(parseChannelInput("@MarkRober")).toEqual({ kind: "handle", channel: "@MarkRober" });
+    expect(parseChannelInput("https://www.youtube.com/@MarkRober/videos")).toEqual({ kind: "handle", channel: "@MarkRober" });
+    expect(parseChannelInput("https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=10s")).toEqual({ kind: "video", videoId: "dQw4w9WgXcQ" });
+    expect(parseChannelInput("youtu.be/dQw4w9WgXcQ")).toEqual({ kind: "video", videoId: "dQw4w9WgXcQ" });
+    expect(parseChannelInput("https://www.youtube.com/shorts/dQw4w9WgXcQ")).toEqual({ kind: "video", videoId: "dQw4w9WgXcQ" });
+    expect(parseChannelInput("https://www.youtube.com/channel/UCY1kMZp36IQSyNx_9h4mpCg")).toEqual({ kind: "channelUrl", url: "https://www.youtube.com/channel/UCY1kMZp36IQSyNx_9h4mpCg" });
+  });
+
+  test("plain names and non-YouTube URLs return null (kept as typed / rejected by the caller)", () => {
+    expect(parseChannelInput("Mark Rober")).toBeNull();
+    expect(parseChannelInput("https://evil.example/@MarkRober")).toBeNull();
+    expect(parseChannelInput("")).toBeNull();
+  });
+});
+
+describe("extractHandleFromHtml", () => {
+  test("reads ownerProfileUrl / vanityChannelUrl / canonicalBaseUrl", () => {
+    expect(extractHandleFromHtml('x "ownerProfileUrl":"http:\\/\\/www.youtube.com\\/@MarkRober" y')).toBe("MarkRober");
+    expect(extractHandleFromHtml('x "vanityChannelUrl":"http://www.youtube.com/@Kurzgesagt" y')).toBe("Kurzgesagt");
+    expect(extractHandleFromHtml('x "canonicalBaseUrl":"\\/@NatGeo" y')).toBe("NatGeo");
+    expect(extractHandleFromHtml("nothing here")).toBe("");
+  });
+});
+
+describe("verdict metadata and day keys", () => {
+  test("withMeta attaches capped title/channel/handle", () => {
+    const r = withMeta({ blocked: true, reason: "r" }, { title: "T".repeat(200), channel: "C", channelHandle: "H" });
+    expect(r).toMatchObject({ blocked: true, reason: "r", channel: "C", channelHandle: "H" });
+    expect(r.title.length).toBe(150);
+  });
+
+  test("dayKey is a local-date YYYY-MM-DD", () => {
+    expect(dayKey(new Date(2026, 0, 5, 12).getTime())).toBe("2026-01-05");
+  });
+});
+
+// ─── Screen time: schedules & limits ────────────────────────────────
+
+describe("parseHHMM", () => {
+  test("parses valid times and rejects junk", () => {
+    expect(parseHHMM("07:30")).toBe(450);
+    expect(parseHHMM("23:59")).toBe(1439);
+    expect(parseHHMM("24:00")).toBeNull();
+    expect(parseHHMM("7:5")).toBeNull();
+    expect(parseHHMM("")).toBeNull();
+  });
+});
+
+describe("getActiveScheduleBlock", () => {
+  // Wednesday 2026-01-07 (getDay() === 3)
+  const at = (h, m) => new Date(2026, 0, 7, h, m).getTime();
+  const homework = { label: "Homework", days: [1, 2, 3, 4, 5], start: "15:00", end: "17:00", enabled: true };
+  const bedtime = { label: "Bedtime", days: [0, 1, 2, 3, 4, 5, 6], start: "20:00", end: "07:00", enabled: true };
+
+  test("same-day window blocks inside and not outside", () => {
+    const hit = getActiveScheduleBlock([homework], at(16, 0));
+    expect(hit).toMatchObject({ label: "Homework" });
+    expect(new Date(hit.until).getHours()).toBe(17);
+    expect(getActiveScheduleBlock([homework], at(17, 0))).toBeNull();
+    expect(getActiveScheduleBlock([homework], at(14, 59))).toBeNull();
+  });
+
+  test("a window that crosses midnight blocks both the evening and the next morning", () => {
+    const evening = getActiveScheduleBlock([bedtime], at(21, 0));
+    expect(evening).toMatchObject({ label: "Bedtime" });
+    expect(new Date(evening.until).getDate()).toBe(8); // ends tomorrow 07:00
+    const morning = getActiveScheduleBlock([bedtime], at(6, 30));
+    expect(morning).toMatchObject({ label: "Bedtime" });
+    expect(new Date(morning.until).getHours()).toBe(7);
+    expect(getActiveScheduleBlock([bedtime], at(12, 0))).toBeNull();
+  });
+
+  test("respects days, enabled flag, and ignores malformed entries", () => {
+    const sunday = new Date(2026, 0, 4, 16, 0).getTime();
+    expect(getActiveScheduleBlock([homework], sunday)).toBeNull();
+    expect(getActiveScheduleBlock([{ ...homework, enabled: false }], at(16, 0))).toBeNull();
+    expect(getActiveScheduleBlock([{ label: "x", days: [3], start: "nope", end: "17:00" }, null, 5], at(16, 0))).toBeNull();
+    expect(getActiveScheduleBlock("not a list", at(16, 0))).toBeNull();
+  });
+});
+
+describe("computeLimitStatus", () => {
+  test("no limit → never reached, remaining null", () => {
+    expect(computeLimitStatus(0, 99999)).toMatchObject({ limitReached: false, remainingSeconds: null });
+  });
+  test("counts extra minutes granted by a parent", () => {
+    expect(computeLimitStatus(30, 29 * 60)).toMatchObject({ limitReached: false, remainingSeconds: 60 });
+    expect(computeLimitStatus(30, 30 * 60)).toMatchObject({ limitReached: true, remainingSeconds: 0 });
+    expect(computeLimitStatus(30, 30 * 60, 15)).toMatchObject({ limitReached: false, remainingSeconds: 15 * 60 });
   });
 });

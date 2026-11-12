@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Kids Guard for YouTube — Settings</title>
+  <title>KindTube — Settings</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -161,9 +161,21 @@
   <!-- ═══ PIN Lock Screen ═══ -->
   <div id="pin-lock">
     <h1>Parent Access Required</h1>
-    <p>Enter your 4-digit PIN to access settings.</p>
-    <input type="password" class="pin-input" id="pinEntry" maxlength="4" inputmode="numeric" pattern="[0-9]*" autofocus>
+    <p>Enter your parent PIN to access settings.</p>
+    <input type="password" class="pin-input" id="pinEntry" maxlength="12" autocomplete="off" autofocus>
+    <div class="btn-row" style="justify-content:center">
+      <button class="btn-save" id="unlockBtn">Unlock</button>
+    </div>
     <p class="pin-error" id="pinError"></p>
+    <p style="margin-top:1rem"><a href="#" id="forgotPinLink" style="font-size:0.85rem;color:#1565c0">Forgot PIN?</a></p>
+    <div id="recoveryPanel" style="display:none;margin-top:0.75rem">
+      <p style="font-size:0.85rem;color:#757575;margin-bottom:0.5rem">Enter the recovery code you were shown when the PIN was set. This removes the PIN so you can set a new one.</p>
+      <input type="text" class="pin-input" id="recoveryEntry" maxlength="14" placeholder="XXXX-XXXX-XXXX" autocomplete="off" style="letter-spacing:0.15rem;font-size:1.1rem;width:220px">
+      <div class="btn-row" style="justify-content:center">
+        <button class="btn-outline" id="recoveryBtn">Remove PIN</button>
+      </div>
+      <p class="pin-error" id="recoveryError"></p>
+    </div>
   </div>
 
   <!-- ═══ Main Settings Panel ═══ -->
@@ -171,23 +183,27 @@
 
     <!-- Header card -->
     <div class="card">
-      <span class="version">v2.3</span>
-      <h1>Kids Guard for YouTube</h1>
-      <p class="subtitle">Parental controls for safe YouTube browsing.</p>
+      <span class="version">v2.7</span>
+      <h1>KindTube</h1>
+      <p class="subtitle">AI parental filter for YouTube — every video checked before it plays.</p>
     </div>
 
     <!-- PIN management -->
     <div class="card">
       <h2>Parent PIN</h2>
-      <p class="hint">Set a 4-digit PIN to lock these settings. Kids won't be able to change or disable the extension without it.</p>
+      <p class="hint">
+        Lock these settings and the on/off switch behind a PIN or short passphrase (4–12 characters, no
+        spaces — longer is safer). Kids can't change or disable the extension without it. Setting a PIN
+        also gives you a one-time <strong>recovery code</strong> in case you forget it.
+      </p>
       <div class="pin-row">
         <div class="field-group">
           <label for="newPin">New PIN</label>
-          <input type="password" id="newPin" maxlength="4" inputmode="numeric" pattern="[0-9]*" placeholder="4 digits">
+          <input type="password" id="newPin" maxlength="12" autocomplete="new-password" placeholder="4–12 characters">
         </div>
         <div class="field-group">
           <label for="confirmPin">Confirm</label>
-          <input type="password" id="confirmPin" maxlength="4" inputmode="numeric" pattern="[0-9]*" placeholder="Repeat">
+          <input type="password" id="confirmPin" maxlength="12" autocomplete="new-password" placeholder="Repeat">
         </div>
       </div>
       <div class="btn-row">
@@ -195,6 +211,12 @@
         <button class="btn-clear" id="clearPinBtn">Remove PIN</button>
       </div>
       <p class="status" id="pinStatus"></p>
+      <div id="recoveryBox" style="display:none;margin-top:0.75rem;padding:0.9rem 1rem;background:#fff8e1;border:1px solid #ffe082;border-radius:8px">
+        <p style="font-size:0.85rem;font-weight:600;margin-bottom:0.35rem">Your recovery code — write it down now. It is shown only once.</p>
+        <p id="recoveryCode" style="font-family:monospace;font-size:1.35rem;letter-spacing:0.12rem;margin:0.25rem 0 0.5rem"></p>
+        <p style="font-size:0.78rem;color:#757575">If you forget the PIN, click "Forgot PIN?" on the lock screen and enter this code to remove it.</p>
+        <div class="btn-row"><button class="btn-outline" id="copyRecoveryBtn">Copy code</button></div>
+      </div>
     </div>
 
     <!-- AI Provider -->
@@ -284,6 +306,55 @@
       <p class="status" id="providerStatus"></p>
     </div>
 
+    <!-- Screen time -->
+    <div class="card">
+      <h2>Screen Time</h2>
+      <p class="hint">
+        A daily limit counts minutes of <em>actual playback</em> (paused videos don't count). When it's used
+        up, a friendly "Time's up" screen appears and a parent can add 15 minutes with the PIN. Schedules
+        block YouTube during set hours — homework time, bedtime — with a "taking a break" screen.
+      </p>
+      <div class="field-group">
+        <label for="dailyLimit">Daily limit</label>
+        <select id="dailyLimit">
+          <option value="0">No limit</option>
+          <option value="15">15 minutes</option>
+          <option value="30">30 minutes</option>
+          <option value="45">45 minutes</option>
+          <option value="60">1 hour</option>
+          <option value="90">1.5 hours</option>
+          <option value="120">2 hours</option>
+          <option value="180">3 hours</option>
+        </select>
+      </div>
+      <div class="field-group">
+        <label for="offlineIdeas">Ideas shown on the "Time's up" screen (one per line)</label>
+        <textarea id="offlineIdeas" rows="4" style="width:100%;font-size:0.85rem;font-family:inherit;padding:0.6rem 0.75rem;border:1px solid #ccc;border-radius:6px;resize:vertical;line-height:1.5;outline:none;" placeholder="Read a book&#10;Draw or build something&#10;Go outside and play"></textarea>
+      </div>
+      <label>Schedules — YouTube is blocked during these windows</label>
+      <div id="scheduleList"></div>
+      <div class="btn-row">
+        <button class="btn-outline" id="addScheduleBtn">Add schedule</button>
+        <button class="btn-save" id="saveScreenTimeBtn">Save screen time</button>
+      </div>
+      <p class="status" id="screenTimeStatus"></p>
+    </div>
+
+    <!-- Filtering mode -->
+    <div class="card">
+      <h2>Filtering Mode</h2>
+      <p class="hint">How videos that are not on your channel lists are handled.</p>
+      <label class="category-item" style="width:fit-content;margin-bottom:0.5rem">
+        <input type="radio" name="filterMode" value="ai" checked>
+        <span><strong>Check every video with AI</strong> — recommended for ages 8+. Blocked and approved lists still apply.</span>
+      </label>
+      <label class="category-item" style="width:fit-content">
+        <input type="radio" name="filterMode" value="allowlist">
+        <span><strong>Allow only approved channels</strong> — recommended for young children. Everything else is blocked; nothing is sent to the AI, so no API usage at all.</span>
+      </label>
+      <p class="status" id="filterModeStatus"></p>
+    </div>
+
     <!-- Blocked categories -->
     <div class="card">
       <h2>Blocked Categories</h2>
@@ -350,13 +421,15 @@
         Videos from these channels are never sent to the AI. They still pause for under a second while the
         extension confirms the channel, so a bad video can't slip through on a stale page. Tick
         <strong>Trusted — play instantly</strong> to skip even that for channels you trust completely.
-        Enter the channel name or @handle (an @handle is the most reliable).
+        Enter an @handle, a channel name, or simply paste the URL of any video or channel page — the
+        @handle is looked up for you.
       </p>
       <div class="list-container">
         <div class="list-input-row">
-          <input type="text" id="whitelistInput" placeholder="e.g. @NationalGeographic">
+          <input type="text" id="whitelistInput" placeholder="@NationalGeographic, or paste a video / channel URL">
           <button class="btn-save" id="addWhitelistBtn">Add</button>
         </div>
+        <p class="status" id="whitelistStatus"></p>
         <div class="list-items" id="whitelistItems"></div>
       </div>
     </div>
@@ -383,14 +456,40 @@
     <!-- Channel blacklist -->
     <div class="card">
       <h2>Blacklisted Channels</h2>
-      <p class="hint">These channels are always blocked — no AI check needed.</p>
+      <p class="hint">These channels are always blocked — no AI check needed. An @handle, a name, or a pasted video / channel URL.</p>
       <div class="list-container">
         <div class="list-input-row">
-          <input type="text" id="blacklistInput" placeholder="e.g. @SomeChannel">
+          <input type="text" id="blacklistInput" placeholder="@SomeChannel, or paste a video / channel URL">
           <button class="btn-danger" id="addBlacklistBtn">Add</button>
         </div>
+        <p class="status" id="blacklistStatus"></p>
         <div class="list-items" id="blacklistItems"></div>
       </div>
+    </div>
+
+    <!-- Recently blocked (review queue) -->
+    <div class="card">
+      <h2>Recently Blocked</h2>
+      <p class="hint">
+        Videos your child tried to open that were blocked, with the reason. Approve a channel or allow a
+        single video with one click — the decision cache clears automatically so the change applies at once.
+      </p>
+      <div class="btn-row" style="margin-top:0">
+        <button class="btn-outline" id="refreshBlocksBtn">Refresh</button>
+        <button class="btn-clear" id="clearBlocksBtn">Clear list</button>
+      </div>
+      <p class="status" id="blocksStatus"></p>
+      <div class="list-items" id="recentBlocks" style="max-height:420px"></div>
+    </div>
+
+    <!-- Weekly report -->
+    <div class="card">
+      <h2>This Week</h2>
+      <p class="hint">Last 7 days: videos allowed and blocked when opened, and minutes watched. All of this stays on this device.</p>
+      <div id="weekChart" style="display:flex;gap:0.5rem;align-items:flex-end;height:140px;padding:0.5rem 0.25rem;border-bottom:1px solid #e0e0e0"></div>
+      <div id="weekLabels" style="display:flex;gap:0.5rem;font-size:0.72rem;color:#757575;margin-top:0.35rem"></div>
+      <div id="weekTotals" style="font-size:0.85rem;color:#616161;margin-top:0.75rem"></div>
+      <div id="topBlocked" style="margin-top:0.75rem"></div>
     </div>
 
     <!-- Import / Export -->

@@ -1,8 +1,8 @@
-# CLAUDE.md — KidsApp (Kids Guard for YouTube)
+# CLAUDE.md — KidsApp (KindTube)
 
 ## Project Overview
 
-**Kids Guard for YouTube** is a Manifest V3 Chrome extension (org: **bitgiants**) that acts as an
+**KindTube** is a Manifest V3 Chrome extension (org: **bitgiants**) that acts as an
 AI-powered parental content filter for youtube.com. It pauses every video, sends the title /
 channel / description / transcript to the parent's chosen LLM provider, and only lets the
 video play on an `ALLOW` verdict. Thumbnails on browse pages get the same treatment
@@ -27,7 +27,7 @@ KidsApp/
 ├── PRIVACY.md             # Privacy policy; published as a public gist and linked from the store listing
 ├── scripts/
 │   ├── validate-setup.js  # `npm run setup` sanity checks
-│   └── package.js         # `npm run package` → dist/kids-guard-for-youtube.zip (no deps)
+│   └── package.js         # `npm run package` → dist/kindtube.zip (no deps)
 ├── tests/                 # Jest unit tests (background.js pure logic)
 └── CLAUDE.md
 ```
@@ -40,7 +40,7 @@ KidsApp/
 | Validate setup | `npm run setup` |
 | Run tests | `npm test` (Jest, `tests/**/*.test.js`) |
 | Lint / format | not configured yet — keep to the existing style (2-space, double quotes, semicolons) |
-| Package for Chrome | `npm run package` → `dist/kids-guard-for-youtube.zip` |
+| Package for Chrome | `npm run package` → `dist/kindtube.zip` |
 | Load in Chrome | `chrome://extensions` → Developer mode → Load unpacked → repo root |
 
 Node ≥ 16 (Node 22 in CI/cloud sessions). There is no build step; the extension files are
@@ -50,8 +50,26 @@ loaded as-is.
 
 - **Message bus**: `content.js` / `options.js` / `popup.js` talk to `background.js` via
   `chrome.runtime.sendMessage`. Message types: `CHECK_VIDEO`, `CHECK_CHANNEL`, `VERIFY_PIN`,
-  `SET_PIN`, `CLEAR_PIN`, `FETCH_MODELS`, `GET_CATEGORIES`, `GET_DEFAULT_PROMPT`, `CLEAR_CACHE`,
-  `GET_DIAGNOSTICS`, `CLEAR_DIAGNOSTICS`.
+  `SET_PIN`, `CLEAR_PIN`, `RESET_PIN_WITH_RECOVERY`, `FETCH_MODELS`, `GET_CATEGORIES`,
+  `GET_DEFAULT_PROMPT`, `CLEAR_CACHE`, `GET_DIAGNOSTICS`, `CLEAR_DIAGNOSTICS`, `ADD_LIST_ENTRY`,
+  `RESOLVE_CHANNEL`, `GET_RECENT_BLOCKS`, `CLEAR_RECENT_BLOCKS`, `GET_STATUS`, `WATCH_TICK`,
+  `EXTEND_LIMIT`.
+- **Filtering modes**: `filterMode` is `ai` (default: every unlisted video goes to the model) or
+  `allowlist` (only approved channels play; `content.js` decides thumbnails locally, the background
+  confirms watch-page channels from the watch page, and the model is never called).
+- **Ask a parent**: the block screen takes the PIN inline (`VERIFY_PIN`) and offers *play once* or
+  *approve channel* (`ADD_LIST_ENTRY`). Watch-page verdicts are recorded (`recentBlocks`, `dailyStats`)
+  for the Options review queue. Any change to lists / mode / categories / prompt / age range clears the
+  decision cache (background `storage.onChanged`).
+- **Screen time**: `dailyLimitMinutes` (0 = off) and `schedules` (`{label, days[0-6], start, end, enabled}`,
+  windows that *block* YouTube, may cross midnight) live in storage. `content.js` samples real playback
+  (1 s ticks while the main video plays and the tab is visible) and flushes `WATCH_TICK` every 10 s;
+  the background adds it to `dailyStats[day].seconds` and answers with the status. `GET_STATUS` is
+  checked on load, every navigation and every 60 s; a schedule hit or `limitReached` shows a full-page
+  policy screen (`#ytkg-policy-block`) that enforces every `<video>` and short-circuits `handleVideoChange`.
+  `EXTEND_LIMIT` is PIN-verified in the background and adds `extraMinutes` for today. Pure logic:
+  `getActiveScheduleBlock`, `computeLimitStatus`, `parseHHMM` (unit-tested). The toolbar badge shows
+  today's block count (`updateBadge`, set from `recordVerdict` and on worker start).
 - **Model chain**: `aiModel` plus up to two `fallbackModels` (same provider) are tried in order
   by `queryModelChain`; a rate-limited non-last model hands off after one short wait, auth
   errors stop the chain, and a fallback answering is recorded in Diagnostics (`kind: fallback`).
@@ -83,7 +101,8 @@ loaded as-is.
   and finally offers "Try again"; the background keeps the worker alive while evaluations are
   in flight, gives watch-page checks a priority lane ahead of thumbnails, retries provider
   calls, and treats provider safety-filter responses as BLOCK rather than as an outage.
-- **PIN** is stored as a SHA-256 hash; verification is rate-limited in the service worker.
+- **PIN** is 4–12 characters, stored as a SHA-256 hash; the attempt counter is persisted in storage
+  (`pinLockout`); a one-time recovery code (hashed, `recoveryCodeHash`) can remove a forgotten PIN.
 - **content.js** must survive YouTube's SPA navigation (`yt-navigate-finish`) and must not
   read stale watch-page metadata for a new video — see `waitForMetadata`.
 

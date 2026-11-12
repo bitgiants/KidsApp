@@ -1,5 +1,5 @@
 {
-  "name": "kids-guard-for-youtube",
+  "name": "kindtube",
   "version": "1.0.0",
   "description": "Chrome extension that filters YouTube videos for child safety using the parent's own AI provider (Gemini, OpenAI, Anthropic, OpenRouter).",
   "main": "background.js",

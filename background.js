@@ -6,7 +6,7 @@
 // BEFORE making any AI call.
 
 // ─── Logging ─────────────────────────────────────────────────────────
-const LOG_PREFIX = "[Kids Guard]";
+const LOG_PREFIX = "[KindTube]";
 function log(...args) { console.log(LOG_PREFIX, ...args); }
 function warn(...args) { console.warn(LOG_PREFIX, ...args); }
 function error(...args) { console.error(LOG_PREFIX, ...args); }
@@ -89,7 +89,7 @@ function buildSystemPrompt(blockedCategories, customPromptTemplate, ageRange) {
 
 const OPENROUTER_HEADERS = {
   "HTTP-Referer": "https://github.com/bitgiants/KidsApp",
-  "X-Title": "Kids Guard for YouTube",
+  "X-Title": "KindTube",
 };
 
 const PROVIDERS = {
@@ -356,6 +356,7 @@ async function getSettings() {
     "customPrompt",
     "useTranscript",
     "ageRange",
+    "filterMode",
   ]);
   const provider = data.aiProvider || "gemini";
   const providerDef = PROVIDERS[provider];
@@ -391,10 +392,13 @@ async function getSettings() {
   const customPrompt = data.customPrompt || "";
   const useTranscript = data.useTranscript !== false; // default ON
   const ageRange = typeof data.ageRange === "string" ? data.ageRange.trim() : "";
+  // "ai" (default): every unlisted video is checked by the model.
+  // "allowlist": only approved channels play; nothing is sent to the model.
+  const filterMode = data.filterMode === "allowlist" ? "allowlist" : "ai";
 
   return {
     provider, providerDef, apiKey, model, fallbackModels, blockedCategories,
-    whitelist, blacklist, customPrompt, useTranscript, ageRange,
+    whitelist, blacklist, customPrompt, useTranscript, ageRange, filterMode,
   };
 }
 
@@ -868,26 +872,46 @@ function checkLists({ videoId, channel, channelHandle }, settings) {
       isChannelInList(channelHandle, settings.whitelist) ||
       isVideoInList(videoId, settings.whitelist)) {
     log("WHITELIST match for", channelHandle || channel || videoId);
-    return { blocked: false, reason: "Whitelisted channel." };
+    return { blocked: false, reason: "Approved channel.", kind: "whitelist" };
   }
   if (isChannelInList(channel, settings.blacklist) ||
       isChannelInList(channelHandle, settings.blacklist) ||
       isVideoInList(videoId, settings.blacklist)) {
     log("BLACKLIST match for", channelHandle || channel || videoId);
-    return { blocked: true, reason: "Blacklisted channel." };
+    return { blocked: true, reason: "This channel is on the blocked list.", kind: "blacklist" };
   }
   return null;
+}
+
+const ALLOWLIST_REASON = "Only approved channels can be watched right now. Ask a parent to approve this channel.";
+
+/** Attach the (authoritative, when available) video metadata to a verdict so
+ *  the block screen can name the channel and the review queue can show it. */
+function withMeta(result, payload) {
+  return {
+    ...result,
+    title: String(payload.title || "").slice(0, 150),
+    channel: String(payload.channel || "").slice(0, 100),
+    channelHandle: String(payload.channelHandle || "").slice(0, 60),
+  };
 }
 
 async function evaluateUncached(payload) {
   const { videoId } = payload;
   const settings = await getSettings();
+  const allowlistOnly = settings.filterMode === "allowlist";
 
   // 1 + 2. Whitelist / blacklist on the scraped channel — only when the
   //        content script confirmed the text belongs to this video.
   if (payload.metadataFresh !== false) {
     const listed = checkLists(payload, settings);
-    if (listed) { cacheSet(videoId, listed); return listed; }
+    if (listed) { const r = withMeta(listed, payload); cacheSet(videoId, r); return r; }
+    // Allow-only mode with a confirmed, unlisted channel: no fetch, no AI.
+    if (allowlistOnly && (payload.channel || payload.channelHandle)) {
+      const r = withMeta({ blocked: true, reason: ALLOWLIST_REASON, kind: "allowlist" }, payload);
+      cacheSet(videoId, r);
+      return r;
+    }
   }
 
   // 3 + 4. Network-bound work goes through the concurrency limiter so a
@@ -900,14 +924,16 @@ async function evaluateUncached(payload) {
     // 3. Authoritative metadata (+ transcript) from the watch page itself.
     //    The page is keyed by video ID, so it can never describe the
     //    previous video the way scraped DOM text can.  Always for
-    //    watch-page checks and whenever the scraped text is unconfirmed;
-    //    otherwise only when transcripts are on (which needs the page anyway).
+    //    watch-page checks, whenever the scraped text is unconfirmed, and
+    //    in allow-only mode (to confirm the channel); otherwise only when
+    //    transcripts are on (which needs the page anyway).
     const needPage =
       settings.useTranscript ||
       payload.source === "watch" ||
-      payload.metadataFresh === false;
+      payload.metadataFresh === false ||
+      allowlistOnly;
     const pageInfo = needPage
-      ? await fetchWatchPageInfo(videoId, settings.useTranscript)
+      ? await fetchWatchPageInfo(videoId, settings.useTranscript && !allowlistOnly)
       : null;
 
     if (pageInfo && pageInfo.title) {
@@ -917,16 +943,24 @@ async function evaluateUncached(payload) {
       payload.description = pageInfo.description || "";
       // Lists get a second look with the authoritative channel.
       const listed = checkLists(payload, settings);
-      if (listed) { cacheSet(videoId, listed); return listed; }
+      if (listed) { const r = withMeta(listed, payload); cacheSet(videoId, r); return r; }
     } else if (payload.metadataFresh === false) {
       // Nothing trustworthy to judge — block, but do NOT cache a verdict
       // that was never actually made.
       warn("No trustworthy metadata for", videoId, "— blocking without caching.");
       return {
         blocked: true,
+        kind: "unverified",
         reason: "Could not verify this video's details — blocked as a precaution. Reload the page to retry.",
       };
     }
+
+    if (allowlistOnly) {
+      const r = withMeta({ blocked: true, reason: ALLOWLIST_REASON, kind: "allowlist" }, payload);
+      cacheSet(videoId, r);
+      return r;
+    }
+
     if (pageInfo?.transcript) payload.transcript = pageInfo.transcript;
 
     // 4. AI evaluation with dynamic system prompt.
@@ -938,11 +972,7 @@ async function evaluateUncached(payload) {
       settings, userPrompt, systemPrompt, videoId
     );
 
-    const result = {
-      blocked: decision === "BLOCK",
-      reason,
-    };
-
+    const result = withMeta({ blocked: decision === "BLOCK", reason, kind: "ai" }, payload);
     cacheSet(videoId, result);
     return result;
   }, { priority: payload.source === "watch" });
@@ -1014,20 +1044,60 @@ async function hashPin(pin) {
     .join("");
 }
 
-// Rate-limiting: lock out after too many failed attempts.
+// PIN rules.  Any characters, 4–12 long (a passphrase beats four digits).
+const PIN_MIN_LEN = 4;
+const PIN_MAX_LEN = 12;
+
+function isValidPin(pin) {
+  return typeof pin === "string" && pin.length >= PIN_MIN_LEN && pin.length <= PIN_MAX_LEN && !/\s/.test(pin);
+}
+
+// Rate-limiting, PERSISTED: the counter used to live in this worker's
+// memory and reset every time Chrome recycled the worker.
 const MAX_PIN_ATTEMPTS = 5;
 const PIN_LOCKOUT_MS = 60 * 1000; // 1 minute
-const pinAttempts = { count: 0, lockedUntil: 0 };
+
+async function getLockout() {
+  const { pinLockout } = await chrome.storage.local.get("pinLockout");
+  return pinLockout && typeof pinLockout === "object"
+    ? { count: Number(pinLockout.count) || 0, lockedUntil: Number(pinLockout.lockedUntil) || 0 }
+    : { count: 0, lockedUntil: 0 };
+}
+
+/** Returns a "locked" response if attempts are currently blocked, else null. */
+async function checkLocked() {
+  const lock = await getLockout();
+  if (Date.now() < lock.lockedUntil) {
+    return { ok: false, locked: true, retryAfterMs: lock.lockedUntil - Date.now() };
+  }
+  return null;
+}
+
+async function noteFailure() {
+  const lock = await getLockout();
+  lock.count += 1;
+  if (lock.count >= MAX_PIN_ATTEMPTS) {
+    lock.count = 0;
+    lock.lockedUntil = Date.now() + PIN_LOCKOUT_MS;
+    await chrome.storage.local.set({ pinLockout: lock });
+    warn(`PIN locked for ${PIN_LOCKOUT_MS / 1000}s after ${MAX_PIN_ATTEMPTS} failed attempts.`);
+    return { ok: false, locked: true, retryAfterMs: PIN_LOCKOUT_MS };
+  }
+  await chrome.storage.local.set({ pinLockout: lock });
+  return { ok: false, locked: false, attemptsLeft: MAX_PIN_ATTEMPTS - lock.count };
+}
+
+async function noteSuccess() {
+  await chrome.storage.local.set({ pinLockout: { count: 0, lockedUntil: 0 } });
+}
 
 async function verifyPin(pin) {
   const { parentPin } = await chrome.storage.local.get("parentPin");
   if (!parentPin) return { ok: true };
 
-  // Check lockout.
-  if (Date.now() < pinAttempts.lockedUntil) {
-    const retryMs = pinAttempts.lockedUntil - Date.now();
-    return { ok: false, locked: true, retryAfterMs: retryMs };
-  }
+  const locked = await checkLocked();
+  if (locked) return locked;
+  if (typeof pin !== "string" || !pin) return noteFailure();
 
   const hashed = await hashPin(pin);
 
@@ -1036,37 +1106,70 @@ async function verifyPin(pin) {
   const match = isLegacy ? parentPin === pin : parentPin === hashed;
 
   if (match) {
-    pinAttempts.count = 0;
-    // Upgrade legacy plaintext PIN to hash.
+    await noteSuccess();
     if (isLegacy) {
       await chrome.storage.local.set({ parentPin: hashed });
       log("Migrated plaintext PIN to SHA-256 hash.");
     }
     return { ok: true };
   }
+  return noteFailure();
+}
 
-  // Failed attempt.
-  pinAttempts.count++;
-  if (pinAttempts.count >= MAX_PIN_ATTEMPTS) {
-    pinAttempts.lockedUntil = Date.now() + PIN_LOCKOUT_MS;
-    pinAttempts.count = 0;
-    warn(`PIN locked for ${PIN_LOCKOUT_MS / 1000}s after ${MAX_PIN_ATTEMPTS} failed attempts.`);
-    return { ok: false, locked: true, retryAfterMs: PIN_LOCKOUT_MS };
-  }
-  return { ok: false, locked: false, attemptsLeft: MAX_PIN_ATTEMPTS - pinAttempts.count };
+// ─── Recovery code ("Forgot PIN?") ───────────────────────────────────
+// Generated when the PIN is set, shown to the parent ONCE, stored hashed.
+
+const RECOVERY_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O, 1/I
+
+function normalizeRecoveryCode(code) {
+  return String(code || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+function formatRecoveryCode(raw) {
+  const n = normalizeRecoveryCode(raw);
+  return (n.match(/.{1,4}/g) || []).join("-");
+}
+
+function generateRecoveryCode() {
+  const bytes = new Uint8Array(12);
+  crypto.getRandomValues(bytes);
+  let raw = "";
+  for (const b of bytes) raw += RECOVERY_ALPHABET[b % RECOVERY_ALPHABET.length]; // 256 % 32 === 0: unbiased
+  return formatRecoveryCode(raw);
 }
 
 async function setPin(pin) {
-  if (!/^\d{4}$/.test(pin)) {
-    return { ok: false, error: "PIN must be exactly 4 digits." };
+  if (!isValidPin(pin)) {
+    return { ok: false, error: `PIN must be ${PIN_MIN_LEN}–${PIN_MAX_LEN} characters with no spaces.` };
   }
   const hashed = await hashPin(pin);
-  await chrome.storage.local.set({ parentPin: hashed });
-  return { ok: true };
+  const recoveryCode = generateRecoveryCode();
+  const recoveryCodeHash = await hashPin(normalizeRecoveryCode(recoveryCode));
+  await chrome.storage.local.set({
+    parentPin: hashed,
+    recoveryCodeHash,
+    pinLockout: { count: 0, lockedUntil: 0 },
+  });
+  return { ok: true, recoveryCode };
 }
 
 async function clearPin() {
-  await chrome.storage.local.remove("parentPin");
+  await chrome.storage.local.remove(["parentPin", "recoveryCodeHash", "pinLockout"]);
+  return { ok: true };
+}
+
+/** "Forgot PIN": a valid recovery code removes the PIN so a new one can be set. */
+async function resetPinWithRecovery(code) {
+  const { recoveryCodeHash } = await chrome.storage.local.get("recoveryCodeHash");
+  if (!recoveryCodeHash) {
+    return { ok: false, error: "No recovery code is on file for this PIN (it was set before recovery codes existed). Remove and reinstall the extension to reset it." };
+  }
+  const locked = await checkLocked();
+  if (locked) return locked;
+  const hashed = await hashPin(normalizeRecoveryCode(code));
+  if (hashed !== recoveryCodeHash) return noteFailure();
+  await clearPin();
+  log("PIN removed with a recovery code.");
   return { ok: true };
 }
 
@@ -1236,6 +1339,261 @@ async function getDiagnostics() {
   };
 }
 
+// ─── Review queue & daily stats ─────────────────────────────────────
+// Watch-page verdicts only (thumbnail checks would swamp the counts).
+
+const MAX_RECENT_BLOCKS = 100;
+const RECENT_BLOCKS_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const DAILY_STATS_KEEP_DAYS = 14;
+
+function dayKey(ts = Date.now()) {
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+async function recordVerdict(payload, result) {
+  if (!payload || payload.source !== "watch" || !hasStorage()) return;
+  const { dailyStats, recentBlocks } = await chrome.storage.local.get(["dailyStats", "recentBlocks"]);
+  const stats = dailyStats && typeof dailyStats === "object" ? dailyStats : {};
+  const today = dayKey();
+  const day = stats[today] || { blocked: 0, allowed: 0 };
+  if (result.blocked) day.blocked += 1; else day.allowed += 1;
+  stats[today] = day;
+  const cutoff = dayKey(Date.now() - DAILY_STATS_KEEP_DAYS * 24 * 60 * 60 * 1000);
+  for (const k of Object.keys(stats)) if (k < cutoff) delete stats[k];
+
+  const updates = { dailyStats: stats };
+  if (result.blocked && result.kind !== "unverified") {
+    const now = Date.now();
+    let list = (Array.isArray(recentBlocks) ? recentBlocks : []).filter((b) => b && now - b.t < RECENT_BLOCKS_MAX_AGE_MS);
+    const last = list[list.length - 1];
+    if (last && last.videoId === payload.videoId && now - last.t < 60 * 60 * 1000) {
+      last.count = (last.count || 1) + 1;
+      last.t = now;
+    } else {
+      list.push({
+        t: now,
+        videoId: payload.videoId,
+        title: String(result.title || payload.title || "").slice(0, 150),
+        channel: String(result.channel || payload.channel || "").slice(0, 100),
+        channelHandle: String(result.channelHandle || payload.channelHandle || "").slice(0, 60),
+        reason: String(result.reason || "").slice(0, 300),
+        kind: result.kind || "ai",
+        count: 1,
+      });
+    }
+    while (list.length > MAX_RECENT_BLOCKS) list.shift();
+    updates.recentBlocks = list;
+  }
+  await chrome.storage.local.set(updates);
+  updateBadge(day.blocked).catch(() => {});
+}
+
+/** Add a channel or a single video to the whitelist/blacklist (deduped). */
+async function addListEntry(list, entry) {
+  if (list !== "whitelist" && list !== "blacklist") return { ok: false, error: "Unknown list." };
+  const data = await chrome.storage.local.get(list);
+  const items = Array.isArray(data[list]) ? data[list] : [];
+  if (entry && typeof entry.videoId === "string") {
+    if (!isValidVideoId(entry.videoId)) return { ok: false, error: "Invalid video ID." };
+    if (!items.some((e) => e && e.videoId === entry.videoId)) {
+      items.push({ videoId: entry.videoId, title: String(entry.title || "").slice(0, 150) });
+    }
+  } else {
+    const channel = String((entry && entry.channel) || "").trim().slice(0, 100);
+    if (!channel) return { ok: false, error: "No channel given." };
+    if (!isChannelInList(channel, items)) items.push({ channel, trusted: !!(entry && entry.trusted) });
+  }
+  await chrome.storage.local.set({ [list]: items });
+  return { ok: true, list: items };
+}
+
+// ─── Channel resolution (paste a URL, get an @handle) ───────────────
+
+const YT_HOSTS = new Set(["www.youtube.com", "youtube.com", "m.youtube.com", "youtu.be"]);
+
+/** Classify a pasted channel reference. Plain display names return null (caller keeps them as-is). */
+function parseChannelInput(input) {
+  const text = String(input || "").trim();
+  if (!text) return null;
+  if (/^@[A-Za-z0-9._-]{3,60}$/.test(text)) return { kind: "handle", channel: text };
+  let url;
+  try { url = new URL(/^https?:\/\//i.test(text) ? text : `https://${text}`); } catch { return null; }
+  if (!YT_HOSTS.has(url.hostname)) return null;
+  const h = /^\/@([A-Za-z0-9._-]{3,60})/.exec(url.pathname);
+  if (h) return { kind: "handle", channel: `@${h[1]}` };
+  let videoId = null;
+  if (url.hostname === "youtu.be") videoId = url.pathname.slice(1);
+  else if (url.pathname === "/watch") videoId = url.searchParams.get("v");
+  else if (url.pathname.startsWith("/shorts/")) videoId = url.pathname.split("/")[2] || null;
+  if (videoId && /^[A-Za-z0-9_-]{11}$/.test(videoId)) return { kind: "video", videoId };
+  const c = /^\/(channel\/[A-Za-z0-9_-]{10,40}|c\/[A-Za-z0-9._-]{1,60}|user\/[A-Za-z0-9._-]{1,60})/.exec(url.pathname);
+  if (c) return { kind: "channelUrl", url: `https://www.youtube.com/${c[1]}` };
+  return null;
+}
+
+/** Pull a channel's @handle out of a YouTube page's embedded data. */
+function extractHandleFromHtml(html) {
+  const text = String(html || "");
+  const m =
+    /"(?:ownerProfileUrl|vanityChannelUrl)":"[^"]*?\\?\/@([^"\\/?]+)"/.exec(text) ||
+    /"canonicalBaseUrl":"\\?\/@([^"\\/?]+)"/.exec(text);
+  return m ? unescapeJsonString(m[1]) : "";
+}
+
+async function resolveChannel(input) {
+  const parsed = parseChannelInput(input);
+  if (!parsed) return { ok: false, error: "Enter an @handle, a channel URL, or a video URL." };
+  if (parsed.kind === "handle") return { ok: true, channel: parsed.channel };
+  try {
+    if (parsed.kind === "video") {
+      const info = await fetchWatchPageInfo(parsed.videoId, false);
+      if (info && info.channelHandle) return { ok: true, channel: `@${info.channelHandle}`, author: info.author || "" };
+      if (info && info.author) return { ok: true, channel: info.author, author: info.author };
+      return { ok: false, error: "Could not read the channel from that video." };
+    }
+    const res = await fetch(parsed.url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const handle = extractHandleFromHtml(await res.text());
+    if (handle) return { ok: true, channel: `@${handle}` };
+    return { ok: false, error: "Could not read the channel's @handle from that page." };
+  } catch (err) {
+    return { ok: false, error: `Could not fetch that page (${err.message}).` };
+  }
+}
+
+// ─── Screen time: daily limit, schedules, status, icon badge ───────
+
+const TICK_MAX_SECONDS = 60; // a single tick can't claim more than this
+const EXTEND_MIN_MINUTES = 5;
+const EXTEND_MAX_MINUTES = 180;
+const DEFAULT_OFFLINE_IDEAS = [
+  "Read a book", "Draw or build something", "Go outside and play",
+  "Help with dinner", "Play a board game",
+];
+
+function parseHHMM(str) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(str || "").trim());
+  if (!m) return null;
+  const h = Number(m[1]);
+  const mi = Number(m[2]);
+  if (h > 23 || mi > 59) return null;
+  return h * 60 + mi;
+}
+
+/**
+ * Which schedule window (if any) blocks YouTube at `now`.  A window may
+ * cross midnight (20:00–07:00); `days` are the weekdays the window
+ * STARTS on (0 = Sunday).  Returns { label, until } (timestamp) or null.
+ */
+function getActiveScheduleBlock(schedules, now = Date.now()) {
+  if (!Array.isArray(schedules)) return null;
+  const d = new Date(now);
+  const minutesNow = d.getHours() * 60 + d.getMinutes();
+  const today = d.getDay();
+  const yesterday = (today + 6) % 7;
+  const endOf = (dayOffset, endMin) => {
+    const e = new Date(d);
+    e.setDate(e.getDate() + dayOffset);
+    e.setHours(Math.floor(endMin / 60), endMin % 60, 0, 0);
+    return e.getTime();
+  };
+  for (const sch of schedules) {
+    if (!sch || sch.enabled === false) continue;
+    const start = parseHHMM(sch.start);
+    const end = parseHHMM(sch.end);
+    if (start == null || end == null || start === end) continue;
+    const days = Array.isArray(sch.days) ? sch.days.map(Number) : [];
+    const label = String(sch.label || "Scheduled break").slice(0, 60);
+    if (start < end) {
+      if (days.includes(today) && minutesNow >= start && minutesNow < end) return { label, until: endOf(0, end) };
+    } else {
+      // Crosses midnight: tonight's half or this morning's half of yesterday's window.
+      if (days.includes(today) && minutesNow >= start) return { label, until: endOf(1, end) };
+      if (days.includes(yesterday) && minutesNow < end) return { label, until: endOf(0, end) };
+    }
+  }
+  return null;
+}
+
+/** Daily-limit arithmetic (pure). remainingSeconds is null when there is no limit. */
+function computeLimitStatus(limitMinutes, usedSeconds, extraMinutes = 0) {
+  const limit = Math.max(0, Number(limitMinutes) || 0);
+  const used = Math.max(0, Number(usedSeconds) || 0);
+  const extra = Math.max(0, Number(extraMinutes) || 0);
+  if (limit === 0) return { limitMinutes: 0, usedSeconds: used, extraMinutes: extra, remainingSeconds: null, limitReached: false };
+  const remaining = Math.max(0, (limit + extra) * 60 - used);
+  return { limitMinutes: limit, usedSeconds: used, extraMinutes: extra, remainingSeconds: remaining, limitReached: remaining <= 0 };
+}
+
+async function getStatus() {
+  const data = hasStorage()
+    ? await chrome.storage.local.get(["dailyLimitMinutes", "schedules", "offlineIdeas", "dailyStats", "guardEnabled"])
+    : {};
+  const stats = data.dailyStats && typeof data.dailyStats === "object" ? data.dailyStats : {};
+  const day = stats[dayKey()] || {};
+  const ideas = Array.isArray(data.offlineIdeas) && data.offlineIdeas.length
+    ? data.offlineIdeas.map((i) => String(i).slice(0, 80)).slice(0, 8)
+    : DEFAULT_OFFLINE_IDEAS;
+  return {
+    guardEnabled: data.guardEnabled !== false,
+    ...computeLimitStatus(data.dailyLimitMinutes, day.seconds, day.extraMinutes),
+    schedule: getActiveScheduleBlock(data.schedules),
+    todayBlocked: day.blocked || 0,
+    todayAllowed: day.allowed || 0,
+    offlineIdeas: ideas,
+    now: Date.now(),
+  };
+}
+
+async function recordWatchTick(seconds) {
+  const secs = Math.min(TICK_MAX_SECONDS, Math.max(0, Number(seconds) || 0));
+  if (hasStorage() && secs > 0) {
+    const { dailyStats } = await chrome.storage.local.get("dailyStats");
+    const stats = dailyStats && typeof dailyStats === "object" ? dailyStats : {};
+    const today = dayKey();
+    const day = stats[today] || { blocked: 0, allowed: 0 };
+    day.seconds = (day.seconds || 0) + secs;
+    stats[today] = day;
+    const cutoff = dayKey(Date.now() - DAILY_STATS_KEEP_DAYS * 24 * 60 * 60 * 1000);
+    for (const k of Object.keys(stats)) if (k < cutoff) delete stats[k];
+    await chrome.storage.local.set({ dailyStats: stats });
+  }
+  return getStatus();
+}
+
+/** "Ask a parent for more time": PIN-gated, adds minutes to today's allowance. */
+async function extendLimit(pin, minutes) {
+  const check = await verifyPin(pin);
+  if (!check.ok) return { ...check, extended: false };
+  const extra = Math.min(EXTEND_MAX_MINUTES, Math.max(EXTEND_MIN_MINUTES, Number(minutes) || 15));
+  const { dailyStats } = await chrome.storage.local.get("dailyStats");
+  const stats = dailyStats && typeof dailyStats === "object" ? dailyStats : {};
+  const today = dayKey();
+  const day = stats[today] || { blocked: 0, allowed: 0 };
+  day.extraMinutes = (day.extraMinutes || 0) + extra;
+  stats[today] = day;
+  await chrome.storage.local.set({ dailyStats: stats });
+  log(`A parent extended today's limit by ${extra} minutes.`);
+  return { ok: true, extended: true, status: await getStatus() };
+}
+
+/** Toolbar icon badge: today's block count. */
+async function updateBadge(count) {
+  if (typeof chrome === "undefined" || !chrome.action?.setBadgeText) return;
+  try {
+    let n = count;
+    if (n == null) {
+      const { dailyStats } = await chrome.storage.local.get("dailyStats");
+      n = (dailyStats && dailyStats[dayKey()] && dailyStats[dayKey()].blocked) || 0;
+    }
+    await chrome.action.setBadgeBackgroundColor({ color: "#b41e1e" });
+    await chrome.action.setBadgeText({ text: n > 0 ? String(n > 99 ? "99+" : n) : "" });
+  } catch (err) {
+    warn("Badge update failed:", err.message);
+  }
+}
+
 // ─── Message listener ────────────────────────────────────────────────
 
 if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
@@ -1245,6 +1603,7 @@ if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
       evaluateVideo(message.payload)
         .then((result) => {
           log(result.blocked ? "BLOCK" : "ALLOW", "—", result.reason);
+          recordVerdict(message.payload, result).catch((err) => warn("recordVerdict failed:", err.message));
           sendResponse(result);
         })
         .catch((err) => {
@@ -1288,6 +1647,59 @@ if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
 
     if (message.type === "CLEAR_PIN") {
       clearPin().then((result) => sendResponse(result));
+      return true;
+    }
+
+    if (message.type === "GET_STATUS") {
+      getStatus()
+        .then((status) => { updateBadge(status.todayBlocked).catch(() => {}); sendResponse(status); })
+        .catch((err) => sendResponse({ error: err.message }));
+      return true;
+    }
+
+    if (message.type === "WATCH_TICK") {
+      recordWatchTick(message.seconds)
+        .then(sendResponse)
+        .catch((err) => sendResponse({ error: err.message }));
+      return true;
+    }
+
+    if (message.type === "EXTEND_LIMIT") {
+      extendLimit(message.pin, message.minutes)
+        .then(sendResponse)
+        .catch((err) => sendResponse({ ok: false, error: err.message }));
+      return true;
+    }
+
+    if (message.type === "RESET_PIN_WITH_RECOVERY") {
+      resetPinWithRecovery(message.code).then(sendResponse);
+      return true;
+    }
+
+    if (message.type === "ADD_LIST_ENTRY") {
+      addListEntry(message.list, message.entry)
+        .then(sendResponse)
+        .catch((err) => sendResponse({ ok: false, error: err.message }));
+      return true;
+    }
+
+    if (message.type === "RESOLVE_CHANNEL") {
+      resolveChannel(message.input).then(sendResponse);
+      return true;
+    }
+
+    if (message.type === "GET_RECENT_BLOCKS") {
+      Promise.resolve(hasStorage() ? chrome.storage.local.get(["recentBlocks", "dailyStats"]) : {})
+        .then((d) => sendResponse({
+          recentBlocks: Array.isArray(d.recentBlocks) ? d.recentBlocks : [],
+          dailyStats: d.dailyStats && typeof d.dailyStats === "object" ? d.dailyStats : {},
+        }));
+      return true;
+    }
+
+    if (message.type === "CLEAR_RECENT_BLOCKS") {
+      Promise.resolve(hasStorage() ? chrome.storage.local.remove("recentBlocks") : null)
+        .then(() => sendResponse({ ok: true }));
       return true;
     }
 
@@ -1335,6 +1747,24 @@ if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
   });
 }
 
+// Any change to what counts as allowed invalidates cached verdicts.
+if (typeof chrome !== "undefined" && chrome.storage?.onChanged) {
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== "local") return;
+    const relevant = ["whitelist", "blacklist", "filterMode", "blockedCategories", "customPrompt", "ageRange"];
+    if (relevant.some((k) => k in changes)) {
+      log("Filtering settings changed — clearing the decision cache.");
+      clearCache().catch((err) => warn("Cache clear failed:", err.message));
+    }
+  });
+}
+
+// Keep the toolbar badge (today's block count) current across worker restarts.
+if (typeof chrome !== "undefined" && chrome.action?.setBadgeText) {
+  updateBadge().catch(() => {});
+  chrome.runtime.onStartup?.addListener(() => updateBadge().catch(() => {}));
+}
+
 // Verdict logic changes between versions — never carry old verdicts over.
 if (typeof chrome !== "undefined" && chrome.runtime?.onInstalled) {
   chrome.runtime.onInstalled.addListener((details) => {
@@ -1366,6 +1796,20 @@ if (typeof module !== "undefined" && module.exports) {
     rateLimitDelayMs,
     queryModelChain,
     RATE_LIMIT_MAX_RETRIES,
+    isValidPin,
+    PIN_MIN_LEN,
+    PIN_MAX_LEN,
+    generateRecoveryCode,
+    normalizeRecoveryCode,
+    formatRecoveryCode,
+    parseChannelInput,
+    extractHandleFromHtml,
+    withMeta,
+    ALLOWLIST_REASON,
+    dayKey,
+    parseHHMM,
+    getActiveScheduleBlock,
+    computeLimitStatus,
     RATE_LIMIT_MAX_DELAY_MS,
     decodeEntities,
     normalizeChannel,

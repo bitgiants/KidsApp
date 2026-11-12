@@ -7,6 +7,32 @@
 const pinLock = document.getElementById("pin-lock");
 const pinEntry = document.getElementById("pinEntry");
 const pinError = document.getElementById("pinError");
+const unlockBtn = document.getElementById("unlockBtn");
+const forgotPinLink = document.getElementById("forgotPinLink");
+const recoveryPanel = document.getElementById("recoveryPanel");
+const recoveryEntry = document.getElementById("recoveryEntry");
+const recoveryBtn = document.getElementById("recoveryBtn");
+const recoveryError = document.getElementById("recoveryError");
+const recoveryBox = document.getElementById("recoveryBox");
+const recoveryCodeEl = document.getElementById("recoveryCode");
+const copyRecoveryBtn = document.getElementById("copyRecoveryBtn");
+const filterModeStatus = document.getElementById("filterModeStatus");
+const whitelistStatus = document.getElementById("whitelistStatus");
+const blacklistStatus = document.getElementById("blacklistStatus");
+const refreshBlocksBtn = document.getElementById("refreshBlocksBtn");
+const clearBlocksBtn = document.getElementById("clearBlocksBtn");
+const blocksStatus = document.getElementById("blocksStatus");
+const recentBlocksEl = document.getElementById("recentBlocks");
+const dailyLimitSel = document.getElementById("dailyLimit");
+const offlineIdeasEl = document.getElementById("offlineIdeas");
+const scheduleListEl = document.getElementById("scheduleList");
+const addScheduleBtn = document.getElementById("addScheduleBtn");
+const saveScreenTimeBtn = document.getElementById("saveScreenTimeBtn");
+const screenTimeStatus = document.getElementById("screenTimeStatus");
+const weekChartEl = document.getElementById("weekChart");
+const weekLabelsEl = document.getElementById("weekLabels");
+const weekTotalsEl = document.getElementById("weekTotals");
+const topBlockedEl = document.getElementById("topBlocked");
 
 // Settings panel
 const settingsPanel = document.getElementById("settings-panel");
@@ -121,33 +147,57 @@ chrome.storage.local.get("parentPin", ({ parentPin }) => {
   settingsPanel.style.display = "none";
 });
 
-pinEntry.addEventListener("input", () => {
-  if (pinEntry.value.length === 4) {
-    chrome.runtime.sendMessage(
-      { type: "VERIFY_PIN", pin: pinEntry.value },
-      (res) => {
-        if (res?.ok) {
-          unlockSettings();
-        } else if (res?.locked) {
-          const secs = Math.ceil((res.retryAfterMs || 60000) / 1000);
-          pinError.textContent = `Too many attempts. Try again in ${secs}s.`;
-          pinEntry.disabled = true;
-          pinEntry.value = "";
-          setTimeout(() => {
-            pinEntry.disabled = false;
-            pinError.textContent = "";
-            pinEntry.focus();
-          }, res.retryAfterMs || 60000);
-        } else {
-          const left = res.attemptsLeft != null ? ` (${res.attemptsLeft} left)` : "";
-          pinError.textContent = `Incorrect PIN.${left} Try again.`;
-          pinEntry.value = "";
-          pinEntry.focus();
-        }
-      }
-    );
-  }
+function submitPin() {
+  const pin = pinEntry.value;
+  if (!pin) return;
+  chrome.runtime.sendMessage({ type: "VERIFY_PIN", pin }, (res) => {
+    if (res?.ok) {
+      unlockSettings();
+    } else if (res?.locked) {
+      const secs = Math.ceil((res.retryAfterMs || 60000) / 1000);
+      pinError.textContent = `Too many attempts. Try again in ${secs}s.`;
+      pinEntry.disabled = true;
+      pinEntry.value = "";
+      setTimeout(() => {
+        pinEntry.disabled = false;
+        pinError.textContent = "";
+        pinEntry.focus();
+      }, res.retryAfterMs || 60000);
+    } else {
+      const left = res?.attemptsLeft != null ? ` (${res.attemptsLeft} left)` : "";
+      pinError.textContent = `Incorrect PIN.${left} Try again.`;
+      pinEntry.value = "";
+      pinEntry.focus();
+    }
+  });
+}
+unlockBtn.addEventListener("click", submitPin);
+pinEntry.addEventListener("keydown", (e) => { if (e.key === "Enter") submitPin(); });
+
+forgotPinLink.addEventListener("click", (e) => {
+  e.preventDefault();
+  recoveryPanel.style.display = recoveryPanel.style.display === "none" ? "block" : "none";
+  if (recoveryPanel.style.display === "block") recoveryEntry.focus();
 });
+
+function submitRecovery() {
+  const code = recoveryEntry.value.trim();
+  if (!code) return;
+  chrome.runtime.sendMessage({ type: "RESET_PIN_WITH_RECOVERY", code }, (res) => {
+    if (res?.ok) {
+      recoveryError.textContent = "";
+      unlockSettings();
+      showStatus(pinStatus, "PIN removed with your recovery code. Set a new PIN now.", "info");
+      newPinInput.focus();
+    } else if (res?.locked) {
+      recoveryError.textContent = `Too many attempts. Try again in ${Math.ceil((res.retryAfterMs || 60000) / 1000)}s.`;
+    } else {
+      recoveryError.textContent = res?.error || "That recovery code is not correct.";
+    }
+  });
+}
+recoveryBtn.addEventListener("click", submitRecovery);
+recoveryEntry.addEventListener("keydown", (e) => { if (e.key === "Enter") submitRecovery(); });
 
 function unlockSettings() {
   pinLock.style.display = "none";
@@ -160,8 +210,8 @@ function unlockSettings() {
 setPinBtn.addEventListener("click", () => {
   const pin = newPinInput.value.trim();
   const confirm = confirmPinInput.value.trim();
-  if (!/^\d{4}$/.test(pin)) {
-    showStatus(pinStatus, "PIN must be exactly 4 digits.", "error");
+  if (pin.length < 4 || pin.length > 12 || /\s/.test(pin)) {
+    showStatus(pinStatus, "PIN must be 4–12 characters with no spaces.", "error");
     return;
   }
   if (pin !== confirm) {
@@ -173,6 +223,10 @@ setPinBtn.addEventListener("click", () => {
       newPinInput.value = "";
       confirmPinInput.value = "";
       showStatus(pinStatus, "PIN set. Settings are now locked.", "success");
+      if (res.recoveryCode) {
+        recoveryCodeEl.textContent = res.recoveryCode;
+        recoveryBox.style.display = "block";
+      }
     } else {
       showStatus(pinStatus, res?.error || "Failed to set PIN.", "error");
     }
@@ -181,7 +235,32 @@ setPinBtn.addEventListener("click", () => {
 
 clearPinBtn.addEventListener("click", () => {
   chrome.runtime.sendMessage({ type: "CLEAR_PIN" }, () => {
+    recoveryBox.style.display = "none";
     showStatus(pinStatus, "PIN removed. Settings are unlocked.", "info");
+  });
+});
+
+copyRecoveryBtn.addEventListener("click", () => {
+  navigator.clipboard.writeText(recoveryCodeEl.textContent).then(
+    () => showStatus(pinStatus, "Recovery code copied.", "success"),
+    () => showStatus(pinStatus, "Could not copy — write the code down.", "error")
+  );
+});
+
+// ─── Filtering mode ─────────────────────────────────────────────────
+
+function loadFilterMode(mode) {
+  const value = mode === "allowlist" ? "allowlist" : "ai";
+  document.querySelectorAll('input[name="filterMode"]').forEach((r) => { r.checked = r.value === value; });
+}
+document.querySelectorAll('input[name="filterMode"]').forEach((r) => {
+  r.addEventListener("change", () => {
+    if (!r.checked) return;
+    chrome.storage.local.set({ filterMode: r.value }, () => {
+      showStatus(filterModeStatus, r.value === "allowlist"
+        ? "Allow-only mode: only approved channels will play. No AI calls."
+        : "AI mode: every unlisted video is checked by the AI.", "success");
+    });
   });
 });
 
@@ -193,7 +272,8 @@ function loadAllSettings() {
       "aiProvider", "aiModel", "fallbackModels",
       ...Object.values(storageKeys),
       "blockedCategories",
-      "whitelist", "blacklist", "recommendations",
+      "whitelist", "blacklist", "recommendations", "filterMode",
+      "dailyLimitMinutes", "schedules", "offlineIdeas",
     ],
     (data) => {
       // Provider
@@ -226,8 +306,140 @@ function loadAllSettings() {
       renderList(blacklistItems, blacklist, "blacklist");
       recommendations = Array.isArray(data.recommendations) ? data.recommendations : [];
       renderRecList();
+
+      loadFilterMode(data.filterMode);
+      loadRecentBlocks();
+      loadScreenTime(data);
     }
   );
+}
+
+// ─── Screen time ────────────────────────────────────────────────────
+
+const DAY_NAMES = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
+let schedules = [];
+
+function loadScreenTime(data) {
+  const limit = Number(data.dailyLimitMinutes) || 0;
+  dailyLimitSel.value = [...dailyLimitSel.options].some((o) => Number(o.value) === limit) ? String(limit) : "0";
+  offlineIdeasEl.value = Array.isArray(data.offlineIdeas) ? data.offlineIdeas.join("\n") : "";
+  schedules = Array.isArray(data.schedules) ? data.schedules.map(normalizeSchedule).filter(Boolean) : [];
+  renderSchedules();
+}
+
+function normalizeSchedule(s) {
+  if (!s || typeof s !== "object") return null;
+  const hhmm = (v) => (/^\d{1,2}:\d{2}$/.test(String(v || "")) ? String(v) : "");
+  return {
+    label: String(s.label || "").slice(0, 60),
+    days: Array.isArray(s.days) ? s.days.map(Number).filter((d) => d >= 0 && d <= 6) : [1, 2, 3, 4, 5],
+    start: hhmm(s.start),
+    end: hhmm(s.end),
+    enabled: s.enabled !== false,
+  };
+}
+
+function renderSchedules() {
+  scheduleListEl.innerHTML = "";
+  if (schedules.length === 0) {
+    scheduleListEl.innerHTML = `<p class="list-empty">No schedules yet. Example: "Bedtime" every day 20:00–07:00, or "Homework" Mon–Fri 15:00–17:00.</p>`;
+    return;
+  }
+  schedules.forEach((s, i) => {
+    const row = document.createElement("div");
+    row.className = "list-item";
+    row.style.cssText = "flex-direction:column;align-items:stretch;gap:0.5rem";
+    row.innerHTML = `
+      <div style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center">
+        <input type="text" class="sch-label" placeholder="Label (e.g. Bedtime)" value="${escapeHtml(s.label)}" style="flex:1;min-width:140px">
+        <label style="display:flex;align-items:center;gap:0.35rem;font-size:0.8rem;margin:0"><input type="checkbox" class="sch-enabled" ${s.enabled ? "checked" : ""}> Enabled</label>
+        <button class="remove-btn sch-remove" title="Remove">&times;</button>
+      </div>
+      <div style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center;font-size:0.8rem">
+        <span>From <input type="time" class="sch-start" value="${escapeHtml(s.start)}" style="width:auto;padding:0.3rem 0.4rem"></span>
+        <span>to <input type="time" class="sch-end" value="${escapeHtml(s.end)}" style="width:auto;padding:0.3rem 0.4rem"></span>
+        <span class="sch-days" style="display:flex;gap:0.25rem;margin-left:0.5rem">
+          ${DAY_NAMES.map((n, d) => `<label style="display:flex;align-items:center;gap:0.15rem;margin:0;font-size:0.75rem"><input type="checkbox" value="${d}" ${s.days.includes(d) ? "checked" : ""}>${n}</label>`).join("")}
+        </span>
+      </div>
+    `;
+    row.querySelector(".sch-remove").addEventListener("click", () => { schedules.splice(i, 1); renderSchedules(); });
+    scheduleListEl.appendChild(row);
+  });
+}
+
+function readSchedulesFromDom() {
+  return [...scheduleListEl.querySelectorAll(".list-item")].map((row) => ({
+    label: row.querySelector(".sch-label").value.trim().slice(0, 60),
+    days: [...row.querySelectorAll(".sch-days input:checked")].map((cb) => Number(cb.value)),
+    start: row.querySelector(".sch-start").value,
+    end: row.querySelector(".sch-end").value,
+    enabled: row.querySelector(".sch-enabled").checked,
+  }));
+}
+
+addScheduleBtn.addEventListener("click", () => {
+  schedules = readSchedulesFromDom();
+  schedules.push({ label: "", days: [1, 2, 3, 4, 5], start: "15:00", end: "17:00", enabled: true });
+  renderSchedules();
+});
+
+saveScreenTimeBtn.addEventListener("click", () => {
+  const list = readSchedulesFromDom();
+  for (const s of list) {
+    if (!s.start || !s.end) { showStatus(screenTimeStatus, "Every schedule needs a start and an end time.", "error"); return; }
+    if (s.start === s.end) { showStatus(screenTimeStatus, "A schedule's start and end can't be the same time.", "error"); return; }
+    if (s.days.length === 0) { showStatus(screenTimeStatus, "Pick at least one day for each schedule.", "error"); return; }
+  }
+  schedules = list;
+  const ideas = offlineIdeasEl.value.split("\n").map((l) => l.trim()).filter(Boolean).slice(0, 8);
+  const dailyLimitMinutes = Number(dailyLimitSel.value) || 0;
+  chrome.storage.local.set({ dailyLimitMinutes, schedules, offlineIdeas: ideas }, () => {
+    renderSchedules();
+    showStatus(screenTimeStatus,
+      (dailyLimitMinutes ? `Daily limit ${dailyLimitMinutes} min` : "No daily limit") +
+      ` · ${schedules.filter((s) => s.enabled).length} active schedule(s) saved.`, "success");
+  });
+});
+
+// ─── Weekly report ──────────────────────────────────────────────────
+
+function localDayKey(ts) {
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function renderWeek(stats, recentBlocks) {
+  const days = [];
+  for (let i = 6; i >= 0; i--) {
+    const ts = Date.now() - i * 24 * 60 * 60 * 1000;
+    const d = stats[localDayKey(ts)] || {};
+    days.push({ label: new Date(ts).toLocaleDateString([], { weekday: "short" }), blocked: d.blocked || 0, allowed: d.allowed || 0, minutes: Math.round((d.seconds || 0) / 60) });
+  }
+  const max = Math.max(1, ...days.map((d) => d.blocked + d.allowed));
+  weekChartEl.innerHTML = days.map((d) => {
+    const a = Math.round((d.allowed / max) * 120);
+    const b = Math.round((d.blocked / max) * 120);
+    return `<div style="flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;gap:1px" title="${d.allowed} allowed, ${d.blocked} blocked, ${d.minutes} min watched">
+      <div style="width:70%;height:${b}px;background:#c62828;border-radius:3px 3px 0 0"></div>
+      <div style="width:70%;height:${a}px;background:#2e7d32;border-radius:${b ? "0" : "3px 3px 0 0"}"></div>
+    </div>`;
+  }).join("");
+  weekLabelsEl.innerHTML = days.map((d) => `<div style="flex:1;text-align:center">${d.label}<br>${d.minutes}m</div>`).join("");
+  const tot = days.reduce((t, d) => ({ a: t.a + d.allowed, b: t.b + d.blocked, m: t.m + d.minutes }), { a: 0, b: 0, m: 0 });
+  weekTotalsEl.innerHTML = `<span style="color:#2e7d32">■</span> ${tot.a} allowed &nbsp; <span style="color:#c62828">■</span> ${tot.b} blocked &nbsp; · ${tot.m} minutes watched this week`;
+
+  const byChannel = new Map();
+  for (const b of recentBlocks || []) {
+    const key = b.channelHandle ? `@${b.channelHandle}` : (b.channel || "");
+    if (!key) continue;
+    byChannel.set(key, (byChannel.get(key) || 0) + (b.count || 1));
+  }
+  const top = [...byChannel.entries()].sort((x, y) => y[1] - x[1]).slice(0, 5);
+  topBlockedEl.innerHTML = top.length
+    ? `<div style="font-size:0.85rem;font-weight:600;margin-bottom:0.3rem">Most-blocked channels</div>` +
+      top.map(([c, n]) => `<div style="font-size:0.82rem;color:#616161">${escapeHtml(c)} — ${n}×</div>`).join("")
+    : "";
 }
 
 // ─── Provider ────────────────────────────────────────────────────────
@@ -518,7 +730,7 @@ let lastDiagnostics = null;
 
 function formatDiagnostics(d) {
   const lines = [
-    `Kids Guard v${d.version} — provider: ${d.provider || "(none yet)"} / model: ${d.model || `(default: ${d.defaultModel || "?"})`}` +
+    `KindTube v${d.version} — provider: ${d.provider || "(none yet)"} / model: ${d.model || `(default: ${d.defaultModel || "?"})`}` +
       (d.fallbackModels && d.fallbackModels.length ? ` / fallbacks: ${d.fallbackModels.join(", ")}` : ""),
     `cache: ${d.cacheSize} decisions · in flight: ${d.inFlight} · queued: ${d.queued}`,
     "",
@@ -608,14 +820,17 @@ function renderList(container, list, listName) {
   }
   for (let i = 0; i < list.length; i++) {
     const entry = list[i];
-    const name = entry.channel || entry;
+    const isVideo = !!(entry && typeof entry === "object" && entry.videoId);
+    const name = isVideo
+      ? `Video ${entry.videoId}${entry.title ? " — " + entry.title : ""}`
+      : (entry.channel || entry);
     const trusted = !!(entry && typeof entry === "object" && entry.trusted);
     const item = document.createElement("div");
     item.className = "list-item";
     item.innerHTML = `
       <span>${escapeHtml(name)}</span>
       <span style="display:flex;align-items:center;gap:0.75rem">
-        ${listName === "whitelist" ? `
+        ${listName === "whitelist" && !isVideo ? `
           <label class="trust-toggle" title="Skip the short verification pause too — videos from this channel start instantly. Use only for channels you trust completely.">
             <input type="checkbox" class="trust-cb" ${trusted ? "checked" : ""}> Trusted — play instantly
           </label>` : ""}
@@ -642,13 +857,38 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
-addWhitelistBtn.addEventListener("click", () => {
-  const val = whitelistInput.value.trim();
+/**
+ * Turn whatever the parent typed into a channel entry.  @handles and
+ * plain names are used as-is; anything that looks like a YouTube URL is
+ * resolved to the channel's @handle by the background.
+ */
+function resolveChannelInput(raw, statusEl, cb) {
+  const val = raw.trim();
   if (!val) return;
-  whitelist.push({ channel: val });
-  chrome.storage.local.set({ whitelist }, () => {
-    whitelistInput.value = "";
-    renderList(whitelistItems, whitelist, "whitelist");
+  const looksLikeUrl = /youtube\.com|youtu\.be|^https?:\/\//i.test(val);
+  if (!looksLikeUrl) { cb(val); return; }
+  showStatus(statusEl, "Looking up the channel\u2026", "info");
+  chrome.runtime.sendMessage({ type: "RESOLVE_CHANNEL", input: val }, (res) => {
+    if (chrome.runtime.lastError || !res?.ok) {
+      showStatus(statusEl, res?.error || "Could not resolve that link.", "error");
+      return;
+    }
+    showStatus(statusEl, `Found ${res.channel}${res.author && res.author !== res.channel ? ` (${res.author})` : ""}.`, "success");
+    cb(res.channel);
+  });
+}
+
+addWhitelistBtn.addEventListener("click", () => {
+  resolveChannelInput(whitelistInput.value, whitelistStatus, (channel) => {
+    if (whitelist.some((e) => (e.channel || e) && String(e.channel || e).toLowerCase().replace(/^@/, "") === channel.toLowerCase().replace(/^@/, ""))) {
+      showStatus(whitelistStatus, `${channel} is already approved.`, "info");
+      return;
+    }
+    whitelist.push({ channel });
+    chrome.storage.local.set({ whitelist }, () => {
+      whitelistInput.value = "";
+      renderList(whitelistItems, whitelist, "whitelist");
+    });
   });
 });
 
@@ -657,13 +897,70 @@ whitelistInput.addEventListener("keydown", (e) => {
 });
 
 addBlacklistBtn.addEventListener("click", () => {
-  const val = blacklistInput.value.trim();
-  if (!val) return;
-  blacklist.push({ channel: val });
-  chrome.storage.local.set({ blacklist }, () => {
-    blacklistInput.value = "";
-    renderList(blacklistItems, blacklist, "blacklist");
+  resolveChannelInput(blacklistInput.value, blacklistStatus, (channel) => {
+    if (blacklist.some((e) => (e.channel || e) && String(e.channel || e).toLowerCase().replace(/^@/, "") === channel.toLowerCase().replace(/^@/, ""))) {
+      showStatus(blacklistStatus, `${channel} is already blocked.`, "info");
+      return;
+    }
+    blacklist.push({ channel });
+    chrome.storage.local.set({ blacklist }, () => {
+      blacklistInput.value = "";
+      renderList(blacklistItems, blacklist, "blacklist");
+    });
   });
+});
+
+// ─── Recently blocked (review queue) ────────────────────────────────
+
+function loadRecentBlocks() {
+  chrome.runtime.sendMessage({ type: "GET_RECENT_BLOCKS" }, (res) => {
+    if (chrome.runtime.lastError || !res) { recentBlocksEl.innerHTML = `<p class="list-empty">Background not reachable.</p>`; return; }
+    renderRecentBlocks(res.recentBlocks || []);
+    renderWeek(res.dailyStats || {}, res.recentBlocks || []);
+  });
+}
+
+function renderRecentBlocks(list) {
+  recentBlocksEl.innerHTML = "";
+  if (!list.length) {
+    recentBlocksEl.innerHTML = `<p class="list-empty">Nothing blocked in the last 7 days.</p>`;
+    return;
+  }
+  for (const b of [...list].reverse()) {
+    const channelLabel = b.channelHandle ? `@${b.channelHandle}` : (b.channel || "");
+    const item = document.createElement("div");
+    item.className = "list-item";
+    item.style.cssText = "flex-direction:column;align-items:stretch;gap:0.4rem";
+    item.innerHTML = `
+      <div style="display:flex;justify-content:space-between;gap:0.75rem;flex-wrap:wrap">
+        <a href="https://www.youtube.com/watch?v=${encodeURIComponent(b.videoId)}" target="_blank" rel="noopener" style="font-weight:600;color:#1565c0;text-decoration:none">${escapeHtml(b.title || b.videoId)}</a>
+        <span style="color:#9e9e9e;font-size:0.78rem;white-space:nowrap">${new Date(b.t).toLocaleString()}${b.count > 1 ? ` · tried ${b.count}×` : ""}</span>
+      </div>
+      <div style="font-size:0.8rem;color:#616161">${channelLabel ? escapeHtml(channelLabel) + " — " : ""}${escapeHtml(b.reason || "")}</div>
+      <div class="btn-row" style="margin-top:0.25rem;gap:0.5rem">
+        ${channelLabel ? `<button class="btn-save" data-act="approve" style="padding:0.35rem 0.8rem;font-size:0.8rem">Approve channel</button>` : ""}
+        <button class="btn-outline" data-act="allow-video" style="padding:0.35rem 0.8rem;font-size:0.8rem">Allow this video</button>
+        ${channelLabel ? `<button class="btn-danger" data-act="block" style="padding:0.35rem 0.8rem;font-size:0.8rem">Block channel</button>` : ""}
+      </div>
+    `;
+    const act = (list, entry, msg) => {
+      chrome.runtime.sendMessage({ type: "ADD_LIST_ENTRY", list, entry }, (res) => {
+        if (chrome.runtime.lastError || !res?.ok) { showStatus(blocksStatus, res?.error || "Could not update the list.", "error"); return; }
+        if (list === "whitelist") { whitelist = res.list; renderList(whitelistItems, whitelist, "whitelist"); }
+        else { blacklist = res.list; renderList(blacklistItems, blacklist, "blacklist"); }
+        showStatus(blocksStatus, msg, "success");
+      });
+    };
+    item.querySelector('[data-act="approve"]')?.addEventListener("click", () => act("whitelist", { channel: channelLabel }, `${channelLabel} approved.`));
+    item.querySelector('[data-act="allow-video"]').addEventListener("click", () => act("whitelist", { videoId: b.videoId, title: b.title || "" }, "This video is now allowed."));
+    item.querySelector('[data-act="block"]')?.addEventListener("click", () => act("blacklist", { channel: channelLabel }, `${channelLabel} blocked.`));
+    recentBlocksEl.appendChild(item);
+  }
+}
+
+refreshBlocksBtn.addEventListener("click", loadRecentBlocks);
+clearBlocksBtn.addEventListener("click", () => {
+  chrome.runtime.sendMessage({ type: "CLEAR_RECENT_BLOCKS" }, () => { showStatus(blocksStatus, "List cleared.", "info"); loadRecentBlocks(); });
 });
 
 blacklistInput.addEventListener("keydown", (e) => {
@@ -762,7 +1059,7 @@ recLabel.addEventListener("keydown", (e) => {
 
 exportBtn.addEventListener("click", () => {
   chrome.storage.local.get(
-    ["blockedCategories", "whitelist", "blacklist", "customPrompt", "useTranscript", "ageRange", "recommendations"],
+    ["blockedCategories", "whitelist", "blacklist", "customPrompt", "useTranscript", "ageRange", "recommendations", "filterMode", "dailyLimitMinutes", "schedules", "offlineIdeas"],
     (data) => {
       const payload = {
         _format: "ytkg-settings-v1",
@@ -775,6 +1072,10 @@ exportBtn.addEventListener("click", () => {
       if (data.useTranscript !== undefined) payload.useTranscript = data.useTranscript;
       if (data.ageRange) payload.ageRange = data.ageRange;
       if (Array.isArray(data.recommendations)) payload.recommendations = data.recommendations;
+      if (data.filterMode) payload.filterMode = data.filterMode;
+      if (data.dailyLimitMinutes) payload.dailyLimitMinutes = data.dailyLimitMinutes;
+      if (Array.isArray(data.schedules)) payload.schedules = data.schedules;
+      if (Array.isArray(data.offlineIdeas)) payload.offlineIdeas = data.offlineIdeas;
       const blob = new Blob([JSON.stringify(payload, null, 2)], {
         type: "application/json",
       });
@@ -825,6 +1126,10 @@ importFile.addEventListener("change", (e) => {
       if (typeof data.ageRange === "string") {
         toSave.ageRange = data.ageRange.trim().slice(0, AGE_RANGE_MAX_LEN);
       }
+      if (data.filterMode === "ai" || data.filterMode === "allowlist") toSave.filterMode = data.filterMode;
+      if (typeof data.dailyLimitMinutes === "number") toSave.dailyLimitMinutes = Math.max(0, Math.min(600, data.dailyLimitMinutes));
+      if (Array.isArray(data.schedules)) toSave.schedules = data.schedules.map(normalizeSchedule).filter(Boolean);
+      if (Array.isArray(data.offlineIdeas)) toSave.offlineIdeas = data.offlineIdeas.map((i) => String(i).slice(0, 80)).slice(0, 8);
       if (Array.isArray(data.recommendations)) {
         // Re-validate every entry; never trust a file blindly.
         recommendations = data.recommendations
