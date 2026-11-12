@@ -52,7 +52,8 @@ loaded as-is.
   `chrome.runtime.sendMessage`. Message types: `CHECK_VIDEO`, `CHECK_CHANNEL`, `VERIFY_PIN`,
   `SET_PIN`, `CLEAR_PIN`, `RESET_PIN_WITH_RECOVERY`, `FETCH_MODELS`, `GET_CATEGORIES`,
   `GET_DEFAULT_PROMPT`, `CLEAR_CACHE`, `GET_DIAGNOSTICS`, `CLEAR_DIAGNOSTICS`, `ADD_LIST_ENTRY`,
-  `RESOLVE_CHANNEL`, `GET_RECENT_BLOCKS`, `CLEAR_RECENT_BLOCKS`.
+  `RESOLVE_CHANNEL`, `GET_RECENT_BLOCKS`, `CLEAR_RECENT_BLOCKS`, `GET_STATUS`, `WATCH_TICK`,
+  `EXTEND_LIMIT`.
 - **Filtering modes**: `filterMode` is `ai` (default: every unlisted video goes to the model) or
   `allowlist` (only approved channels play; `content.js` decides thumbnails locally, the background
   confirms watch-page channels from the watch page, and the model is never called).
@@ -60,6 +61,15 @@ loaded as-is.
   *approve channel* (`ADD_LIST_ENTRY`). Watch-page verdicts are recorded (`recentBlocks`, `dailyStats`)
   for the Options review queue. Any change to lists / mode / categories / prompt / age range clears the
   decision cache (background `storage.onChanged`).
+- **Screen time**: `dailyLimitMinutes` (0 = off) and `schedules` (`{label, days[0-6], start, end, enabled}`,
+  windows that *block* YouTube, may cross midnight) live in storage. `content.js` samples real playback
+  (1 s ticks while the main video plays and the tab is visible) and flushes `WATCH_TICK` every 10 s;
+  the background adds it to `dailyStats[day].seconds` and answers with the status. `GET_STATUS` is
+  checked on load, every navigation and every 60 s; a schedule hit or `limitReached` shows a full-page
+  policy screen (`#ytkg-policy-block`) that enforces every `<video>` and short-circuits `handleVideoChange`.
+  `EXTEND_LIMIT` is PIN-verified in the background and adds `extraMinutes` for today. Pure logic:
+  `getActiveScheduleBlock`, `computeLimitStatus`, `parseHHMM` (unit-tested). The toolbar badge shows
+  today's block count (`updateBadge`, set from `recordVerdict` and on worker start).
 - **Model chain**: `aiModel` plus up to two `fallbackModels` (same provider) are tried in order
   by `queryModelChain`; a rate-limited non-last model hands off after one short wait, auth
   errors stop the chain, and a fallback answering is recorded in Diagnostics (`kind: fallback`).

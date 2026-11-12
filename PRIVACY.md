@@ -20,10 +20,11 @@ KindTube ("the extension") is a browser extension that helps parents filter YouT
 | Your AI provider API key(s) | Entered by you in Settings | Only to the provider that issued the key, as part of each request | Required by the provider to accept requests |
 | Parent PIN and its recovery code | Entered by / shown to you in Settings | Never leave your device; both stored as SHA-256 hashes | To lock Settings and the on/off switch; the recovery code removes a forgotten PIN |
 | PIN attempt counter | Produced by the extension | Your device only | Rate-limits PIN guesses |
-| Settings (filtering mode, categories, age range, custom prompt, approved / blocked channels, recommended videos) | Entered by you | Your device only | To apply your choices |
+| Settings (filtering mode, categories, age range, custom prompt, approved / blocked channels, recommended videos, daily limit, schedules, offline ideas) | Entered by you | Your device only | To apply your choices |
 | Decision cache (video ID → allow/block + reason) | Produced by the extension | Your device only, expires after 24 hours | Speed and lower API cost |
 | Diagnostics (recent failed checks: time, provider, error message) | Produced by the extension | Your device only (last 25 entries) | To help you troubleshoot; can be cleared in Settings |
 | Review queue (videos that were blocked when opened: title, channel, reason, time) and daily allowed/blocked counts | Produced by the extension | Your device only (7 days / 14 days) | So the parent can approve a channel or a video with one click, and see activity; can be cleared in Settings |
+| Daily watch time (minutes of playback per day) and parent-granted extra minutes | Produced by the extension | Your device only (14 days) | To enforce the daily limit and draw the "This Week" chart in Settings |
 
 ## What the extension does not do
 
@@ -51,7 +52,8 @@ The extension is a tool operated by a parent or guardian. It is configured by an
 
 - Everything the extension stores lives in your browser's extension storage and is removed when you uninstall the extension.
 - **Clear decision cache** (Settings → Analysis Options) deletes all cached allow/block decisions.
-- **Clear** (Settings → Diagnostics) deletes the failure log; **Clear list** (Settings → Recently Blocked) deletes the review queue.
+- **Clear** (Settings → Diagnostics) deletes the failure log; **Clear list** (Settings → Recently Blocked) deletes the review queue. Daily counters (including watch time) expire automatically after 14 days.
+- The toolbar icon badge shows only today's number of blocked videos; it is computed from the daily counters and is not stored separately.
 - Removing an API key or channel entry in Settings deletes it immediately.
 - The decision cache expires automatically after 24 hours and is also cleared whenever the extension updates.
 

@@ -9,6 +9,29 @@ const pinError = document.getElementById("pinError");
 const pinSubmit = document.getElementById("pinSubmit");
 const settingsLink = document.getElementById("settingsLink");
 
+// ─── Today's numbers ─────────────────────────────────────────────────
+
+function loadStatus() {
+  chrome.runtime.sendMessage({ type: "GET_STATUS" }, (s) => {
+    const today = document.getElementById("statToday");
+    const time = document.getElementById("statTime");
+    const sched = document.getElementById("statSchedule");
+    if (chrome.runtime.lastError || !s || s.error) { today.textContent = "Today: —"; return; }
+    today.textContent = `Today: ${s.todayBlocked} blocked · ${s.todayAllowed} allowed`;
+    const used = Math.round((s.usedSeconds || 0) / 60);
+    time.textContent = s.limitMinutes
+      ? `Watch time: ${used} / ${s.limitMinutes + (s.extraMinutes || 0)} min${s.limitReached ? " — limit reached" : ""}`
+      : `Watch time: ${used} min (no limit)`;
+    if (s.schedule) {
+      sched.style.display = "block";
+      sched.textContent = `${s.schedule.label} — back at ${new Date(s.schedule.until).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
+    } else {
+      sched.style.display = "none";
+    }
+  });
+}
+loadStatus();
+
 // ─── Load current state ───────────────────────────────────────────────
 
 chrome.storage.local.get("guardEnabled", ({ guardEnabled }) => {

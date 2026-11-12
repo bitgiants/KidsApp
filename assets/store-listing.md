@@ -42,6 +42,8 @@ MADE FOR PARENTS
 • A "Recently blocked" list in Settings shows what your child tried to open and why, with one-click Approve / Allow / Block.
 • Always-block channels.
 • Recommended videos and channels that appear on every block screen.
+• Screen time: set a daily watch limit (only real playback counts) and schedules such as homework hours or bedtime. Children see a friendly "Time's up" / "YouTube is taking a break" screen with your own list of offline ideas, and a parent can add 15 minutes with the PIN.
+• "This Week" in Settings: a simple chart of allowed and blocked videos and minutes watched per day, plus the most-blocked channels. The toolbar icon shows today's number of blocked videos, and the popup shows today's counts and watch time at a glance.
 • Edit the AI's instructions if you want to fine-tune the filter.
 • Everything — including the on/off switch — is locked behind a parent PIN or passphrase, with a one-time recovery code in case you forget it.
 • Import/export your settings to set up another computer in seconds.
@@ -84,7 +86,7 @@ Screenshots must show the real extension in use (no mock-ups). Set the Chrome wi
 2. The wait screen: "One moment, please!"
 3. The YouTube Home page with ✓ / ✗ badges on thumbnails.
 4. Settings → AI Provider card: provider, model, fallback models.
-5. Settings → Whitelisted Channels (with a "Trusted — play instantly" tick) and Recommended Videos & Channels.
+5. Settings → Screen Time (daily limit + a schedule) and the "This Week" chart — or the "Time's up for today!" screen.
 
 Crop or blur anything personal (account avatar, email) before uploading.
 

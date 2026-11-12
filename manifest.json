@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "KindTube \u2013 AI Parental Filter for YouTube",
   "short_name": "KindTube",
-  "version": "2.6.0",
+  "version": "2.7.0",
   "description": "AI parental filter for YouTube. Blocks unsafe videos and Shorts using your own AI key. PIN-locked settings and channel lists.",
   "permissions": [
     "storage"

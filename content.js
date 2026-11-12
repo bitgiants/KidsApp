@@ -137,6 +137,7 @@
     document.getElementById("ytkg-channel-block")?.remove();
     releaseAllBlocks();
     removeShortsPageBlock();
+    clearPolicyBlock(false);
 
     // Remove the injected stylesheet so all CSS shields disappear.
     document.getElementById("ytkg-styles")?.remove();
@@ -172,6 +173,7 @@
     if (video) onVideoFound(video);
     if (isYouTubeShorts()) blockShortsPage();
     checkChannelPage();
+    refreshStatus();
   }
 
   // ─── Injected stylesheet ────────────────────────────────────────────
@@ -317,6 +319,13 @@
       .ytkg-ask__btn:hover { opacity: 0.9; }
       .ytkg-ask__btn--ghost { background: transparent; color: #fff; border: 2px solid rgba(255,255,255,0.6); }
       .ytkg-ask__msg { font-size: 0.95rem; margin: 0.6rem 0 0; min-height: 1.2em; opacity: 0.95; }
+
+      .ytkg-ideas {
+        margin: 1rem 0 0.25rem; background: rgba(255,255,255,0.14); border-radius: 12px;
+        padding: 0.9rem 1.25rem; max-width: 520px; text-align: left;
+      }
+      .ytkg-ideas__title { font-weight: 600; margin: 0 0 0.4rem; font-size: 1rem; }
+      .ytkg-ideas ul { margin: 0; padding-left: 1.2rem; font-size: 1rem; line-height: 1.5; }
 
       /* ── Recommended alternatives on block screens: a green "approved"
          zone that stands apart from the red block ── */
@@ -1125,6 +1134,163 @@
     mutedByGuard.clear();
   }
 
+  // ─── Screen time: daily limit & schedules ─────────────────────────
+  // The background keeps the numbers; this side samples real playback
+  // (1 s ticks while the main video is playing and the tab is visible),
+  // flushes every 10 s, and shows the full-page "Time's up" / "taking a
+  // break" screens when the background says so.
+
+  const POLICY_BLOCK_ID = "ytkg-policy-block";
+  const TICK_FLUSH_SECONDS = 10;
+  const STATUS_POLL_MS = 60000;
+  let policyBlock = null; // null | { kind: "limit" | "schedule", status }
+  let pendingSeconds = 0;
+
+  function mainVideo() {
+    return document.querySelector("#movie_player video") || document.querySelector("video");
+  }
+
+  function isMainVideoPlaying() {
+    if (document.visibilityState !== "visible") return false;
+    const v = mainVideo();
+    return !!v && !v.paused && !v.ended && v.readyState >= 2;
+  }
+
+  function enforceAllVideos() {
+    document.querySelectorAll("video").forEach((videoEl) => {
+      enforceBlock(videoEl);
+      if (!videoEl.muted) {
+        videoEl.muted = true;
+        mutedByGuard.add(videoEl);
+      }
+    });
+  }
+
+  function refreshStatus() {
+    if (!guardEnabled) return;
+    try {
+      chrome.runtime.sendMessage({ type: "GET_STATUS" }, (status) => {
+        if (!chrome.runtime.lastError && status && !status.error) applyStatus(status);
+      });
+    } catch { /* extension context gone (reload) */ }
+  }
+
+  function applyStatus(status) {
+    if (!guardEnabled) return;
+    if (status.schedule) { showPolicyBlock("schedule", status); return; }
+    if (status.limitReached) { showPolicyBlock("limit", status); return; }
+    if (policyBlock) clearPolicyBlock(true);
+  }
+
+  // Playback sampler + flush.
+  setInterval(() => {
+    if (!guardEnabled || policyBlock) return;
+    if (isMainVideoPlaying()) pendingSeconds += 1;
+    if (pendingSeconds >= TICK_FLUSH_SECONDS) {
+      const seconds = pendingSeconds;
+      pendingSeconds = 0;
+      try {
+        chrome.runtime.sendMessage({ type: "WATCH_TICK", seconds }, (status) => {
+          if (!chrome.runtime.lastError && status && !status.error) applyStatus(status);
+        });
+      } catch { /* context gone */ }
+    }
+  }, 1000);
+  setInterval(refreshStatus, STATUS_POLL_MS);
+
+  function showPolicyBlock(kind, status) {
+    policyBlock = { kind, status };
+    enforceAllVideos();
+    const existing = document.getElementById(POLICY_BLOCK_ID);
+    if (existing && existing.dataset.kind === kind) return;
+    existing?.remove();
+
+    const overlay = document.createElement("div");
+    overlay.id = POLICY_BLOCK_ID;
+    overlay.className = "ytkg-channel-block";
+    overlay.dataset.kind = kind;
+    const used = Math.round((status.usedSeconds || 0) / 60);
+    const ideas = (status.offlineIdeas || []).map((i) => `<li>${escapeHtml(String(i))}</li>`).join("");
+    const ideasHtml = ideas
+      ? `<div class="ytkg-ideas"><p class="ytkg-ideas__title">Some ideas for right now</p><ul>${ideas}</ul></div>`
+      : "";
+    if (kind === "limit") {
+      overlay.innerHTML = `
+        <p class="ytkg-channel-block__title">Time's up for today!</p>
+        <p class="ytkg-channel-block__reason">You've watched ${used} minute${used === 1 ? "" : "s"} of YouTube today. Come back tomorrow &mdash; or ask a parent for a little more time.</p>
+        ${ideasHtml}
+        <div class="ytkg-overlay__actions">
+          <button class="ytkg-overlay__back-btn" type="button" data-act="home">Go to Home</button>
+          <button class="ytkg-overlay__ask-btn" type="button" data-act="ask">Ask a parent for 15 more minutes</button>
+        </div>
+        <div class="ytkg-ask"></div>
+      `;
+    } else {
+      const until = status.schedule && status.schedule.until
+        ? new Date(status.schedule.until).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+        : "";
+      overlay.innerHTML = `
+        <p class="ytkg-channel-block__title">YouTube is taking a break</p>
+        <p class="ytkg-channel-block__reason">${escapeHtml((status.schedule && status.schedule.label) || "Scheduled break")}${until ? ` &mdash; YouTube will be back at ${escapeHtml(until)}.` : "."}</p>
+        ${ideasHtml}
+        <div class="ytkg-overlay__actions">
+          <button class="ytkg-overlay__back-btn" type="button" data-act="home">Go to Home</button>
+        </div>
+      `;
+    }
+    document.body.appendChild(overlay);
+    overlay.querySelector('[data-act="home"]').addEventListener("click", () => { window.location.assign(HOME_URL); });
+    overlay.querySelector('[data-act="ask"]')?.addEventListener("click", () => openExtendPrompt(overlay));
+    log(`Screen-time block shown (${kind}).`);
+  }
+
+  function openExtendPrompt(overlay) {
+    const box = overlay.querySelector(".ytkg-ask");
+    if (!box) return;
+    box.innerHTML = `
+      <p class="ytkg-ask__title">Parent check</p>
+      <div class="ytkg-ask__row">
+        <input class="ytkg-ask__pin" type="password" maxlength="12" placeholder="Parent PIN" autocomplete="off" aria-label="Parent PIN">
+        <button class="ytkg-ask__btn" type="button" data-act="extend">Add 15 minutes</button>
+        <button class="ytkg-ask__btn ytkg-ask__btn--ghost" type="button" data-act="cancel">Cancel</button>
+      </div>
+      <p class="ytkg-ask__msg" aria-live="polite"></p>
+    `;
+    const pinInput = box.querySelector(".ytkg-ask__pin");
+    const msg = box.querySelector(".ytkg-ask__msg");
+    pinInput.focus();
+    const go = () => {
+      chrome.runtime.sendMessage({ type: "EXTEND_LIMIT", pin: pinInput.value, minutes: 15 }, (res) => {
+        if (chrome.runtime.lastError || !res) { msg.textContent = "Could not reach the extension — please try again."; return; }
+        if (res.ok) { log("A parent added 15 minutes."); applyStatus(res.status); return; }
+        msg.textContent = res.locked
+          ? `Too many tries — please wait ${Math.ceil((res.retryAfterMs || 60000) / 1000)}s.`
+          : `Incorrect PIN${res.attemptsLeft != null ? ` (${res.attemptsLeft} left)` : ""}.`;
+        pinInput.value = "";
+        pinInput.focus();
+      });
+    };
+    box.querySelector('[data-act="extend"]').addEventListener("click", go);
+    pinInput.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); if (e.key === "Escape") box.innerHTML = ""; });
+    box.querySelector('[data-act="cancel"]').addEventListener("click", () => { box.innerHTML = ""; });
+  }
+
+  function clearPolicyBlock(resume) {
+    if (!policyBlock && !document.getElementById(POLICY_BLOCK_ID)) return;
+    policyBlock = null;
+    document.getElementById(POLICY_BLOCK_ID)?.remove();
+    for (const videoEl of mutedByGuard) videoEl.muted = false;
+    mutedByGuard.clear();
+    releaseAllBlocks();
+    log("Screen-time block cleared.");
+    if (resume && getVideoId()) {
+      lastCheckedVideoId = null;
+      lastVerdict = null;
+      const videoEl = mainVideo();
+      if (videoEl) handleVideoChange(videoEl);
+    }
+  }
+
   // ─── Video handling ──────────────────────────────────────────────────
 
   // ─── Metadata polling ─────────────────────────────────────────────────
@@ -1182,6 +1348,9 @@
    */
   function handleVideoChange(videoEl) {
     if (!guardEnabled) return;
+
+    // Under a screen-time block nothing is evaluated — it just stays paused.
+    if (policyBlock) { enforceAllVideos(); return; }
 
     const videoId = getVideoId();
 
@@ -1426,6 +1595,11 @@
     lastHandledHref = href;
     if (!guardEnabled) return;
 
+    // Screen-time status may have changed since the last page (a schedule
+    // window starting, a limit hit in another tab).
+    refreshStatus();
+    if (policyBlock) { enforceAllVideos(); return; }
+
     // Check if we navigated to a blacklisted channel page.
     checkChannelPage();
 
@@ -1480,6 +1654,7 @@
   // being blocked.
   setInterval(() => {
     if (!guardEnabled) return;
+    if (policyBlock) { enforceAllVideos(); return; }
     if (window.location.href !== lastHandledHref) {
       log("URL changed without yt-navigate-finish:", window.location.href);
       handleNavigation();
@@ -1772,6 +1947,9 @@
 
   // Scan existing thumbnails on page load.
   scanThumbnails();
+
+  // Screen-time status (daily limit / schedule) for this page.
+  refreshStatus();
 
   // Extend the existing DOM observer to also pick up new thumbnail cards
   // as the user scrolls (infinite scroll loads new cards).

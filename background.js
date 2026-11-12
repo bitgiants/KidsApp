@@ -1386,6 +1386,7 @@ async function recordVerdict(payload, result) {
     updates.recentBlocks = list;
   }
   await chrome.storage.local.set(updates);
+  updateBadge(day.blocked).catch(() => {});
 }
 
 /** Add a channel or a single video to the whitelist/blacklist (deduped). */
@@ -1461,6 +1462,138 @@ async function resolveChannel(input) {
   }
 }
 
+// ─── Screen time: daily limit, schedules, status, icon badge ───────
+
+const TICK_MAX_SECONDS = 60; // a single tick can't claim more than this
+const EXTEND_MIN_MINUTES = 5;
+const EXTEND_MAX_MINUTES = 180;
+const DEFAULT_OFFLINE_IDEAS = [
+  "Read a book", "Draw or build something", "Go outside and play",
+  "Help with dinner", "Play a board game",
+];
+
+function parseHHMM(str) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(str || "").trim());
+  if (!m) return null;
+  const h = Number(m[1]);
+  const mi = Number(m[2]);
+  if (h > 23 || mi > 59) return null;
+  return h * 60 + mi;
+}
+
+/**
+ * Which schedule window (if any) blocks YouTube at `now`.  A window may
+ * cross midnight (20:00–07:00); `days` are the weekdays the window
+ * STARTS on (0 = Sunday).  Returns { label, until } (timestamp) or null.
+ */
+function getActiveScheduleBlock(schedules, now = Date.now()) {
+  if (!Array.isArray(schedules)) return null;
+  const d = new Date(now);
+  const minutesNow = d.getHours() * 60 + d.getMinutes();
+  const today = d.getDay();
+  const yesterday = (today + 6) % 7;
+  const endOf = (dayOffset, endMin) => {
+    const e = new Date(d);
+    e.setDate(e.getDate() + dayOffset);
+    e.setHours(Math.floor(endMin / 60), endMin % 60, 0, 0);
+    return e.getTime();
+  };
+  for (const sch of schedules) {
+    if (!sch || sch.enabled === false) continue;
+    const start = parseHHMM(sch.start);
+    const end = parseHHMM(sch.end);
+    if (start == null || end == null || start === end) continue;
+    const days = Array.isArray(sch.days) ? sch.days.map(Number) : [];
+    const label = String(sch.label || "Scheduled break").slice(0, 60);
+    if (start < end) {
+      if (days.includes(today) && minutesNow >= start && minutesNow < end) return { label, until: endOf(0, end) };
+    } else {
+      // Crosses midnight: tonight's half or this morning's half of yesterday's window.
+      if (days.includes(today) && minutesNow >= start) return { label, until: endOf(1, end) };
+      if (days.includes(yesterday) && minutesNow < end) return { label, until: endOf(0, end) };
+    }
+  }
+  return null;
+}
+
+/** Daily-limit arithmetic (pure). remainingSeconds is null when there is no limit. */
+function computeLimitStatus(limitMinutes, usedSeconds, extraMinutes = 0) {
+  const limit = Math.max(0, Number(limitMinutes) || 0);
+  const used = Math.max(0, Number(usedSeconds) || 0);
+  const extra = Math.max(0, Number(extraMinutes) || 0);
+  if (limit === 0) return { limitMinutes: 0, usedSeconds: used, extraMinutes: extra, remainingSeconds: null, limitReached: false };
+  const remaining = Math.max(0, (limit + extra) * 60 - used);
+  return { limitMinutes: limit, usedSeconds: used, extraMinutes: extra, remainingSeconds: remaining, limitReached: remaining <= 0 };
+}
+
+async function getStatus() {
+  const data = hasStorage()
+    ? await chrome.storage.local.get(["dailyLimitMinutes", "schedules", "offlineIdeas", "dailyStats", "guardEnabled"])
+    : {};
+  const stats = data.dailyStats && typeof data.dailyStats === "object" ? data.dailyStats : {};
+  const day = stats[dayKey()] || {};
+  const ideas = Array.isArray(data.offlineIdeas) && data.offlineIdeas.length
+    ? data.offlineIdeas.map((i) => String(i).slice(0, 80)).slice(0, 8)
+    : DEFAULT_OFFLINE_IDEAS;
+  return {
+    guardEnabled: data.guardEnabled !== false,
+    ...computeLimitStatus(data.dailyLimitMinutes, day.seconds, day.extraMinutes),
+    schedule: getActiveScheduleBlock(data.schedules),
+    todayBlocked: day.blocked || 0,
+    todayAllowed: day.allowed || 0,
+    offlineIdeas: ideas,
+    now: Date.now(),
+  };
+}
+
+async function recordWatchTick(seconds) {
+  const secs = Math.min(TICK_MAX_SECONDS, Math.max(0, Number(seconds) || 0));
+  if (hasStorage() && secs > 0) {
+    const { dailyStats } = await chrome.storage.local.get("dailyStats");
+    const stats = dailyStats && typeof dailyStats === "object" ? dailyStats : {};
+    const today = dayKey();
+    const day = stats[today] || { blocked: 0, allowed: 0 };
+    day.seconds = (day.seconds || 0) + secs;
+    stats[today] = day;
+    const cutoff = dayKey(Date.now() - DAILY_STATS_KEEP_DAYS * 24 * 60 * 60 * 1000);
+    for (const k of Object.keys(stats)) if (k < cutoff) delete stats[k];
+    await chrome.storage.local.set({ dailyStats: stats });
+  }
+  return getStatus();
+}
+
+/** "Ask a parent for more time": PIN-gated, adds minutes to today's allowance. */
+async function extendLimit(pin, minutes) {
+  const check = await verifyPin(pin);
+  if (!check.ok) return { ...check, extended: false };
+  const extra = Math.min(EXTEND_MAX_MINUTES, Math.max(EXTEND_MIN_MINUTES, Number(minutes) || 15));
+  const { dailyStats } = await chrome.storage.local.get("dailyStats");
+  const stats = dailyStats && typeof dailyStats === "object" ? dailyStats : {};
+  const today = dayKey();
+  const day = stats[today] || { blocked: 0, allowed: 0 };
+  day.extraMinutes = (day.extraMinutes || 0) + extra;
+  stats[today] = day;
+  await chrome.storage.local.set({ dailyStats: stats });
+  log(`A parent extended today's limit by ${extra} minutes.`);
+  return { ok: true, extended: true, status: await getStatus() };
+}
+
+/** Toolbar icon badge: today's block count. */
+async function updateBadge(count) {
+  if (typeof chrome === "undefined" || !chrome.action?.setBadgeText) return;
+  try {
+    let n = count;
+    if (n == null) {
+      const { dailyStats } = await chrome.storage.local.get("dailyStats");
+      n = (dailyStats && dailyStats[dayKey()] && dailyStats[dayKey()].blocked) || 0;
+    }
+    await chrome.action.setBadgeBackgroundColor({ color: "#b41e1e" });
+    await chrome.action.setBadgeText({ text: n > 0 ? String(n > 99 ? "99+" : n) : "" });
+  } catch (err) {
+    warn("Badge update failed:", err.message);
+  }
+}
+
 // ─── Message listener ────────────────────────────────────────────────
 
 if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
@@ -1514,6 +1647,27 @@ if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
 
     if (message.type === "CLEAR_PIN") {
       clearPin().then((result) => sendResponse(result));
+      return true;
+    }
+
+    if (message.type === "GET_STATUS") {
+      getStatus()
+        .then((status) => { updateBadge(status.todayBlocked).catch(() => {}); sendResponse(status); })
+        .catch((err) => sendResponse({ error: err.message }));
+      return true;
+    }
+
+    if (message.type === "WATCH_TICK") {
+      recordWatchTick(message.seconds)
+        .then(sendResponse)
+        .catch((err) => sendResponse({ error: err.message }));
+      return true;
+    }
+
+    if (message.type === "EXTEND_LIMIT") {
+      extendLimit(message.pin, message.minutes)
+        .then(sendResponse)
+        .catch((err) => sendResponse({ ok: false, error: err.message }));
       return true;
     }
 
@@ -1605,6 +1759,12 @@ if (typeof chrome !== "undefined" && chrome.storage?.onChanged) {
   });
 }
 
+// Keep the toolbar badge (today's block count) current across worker restarts.
+if (typeof chrome !== "undefined" && chrome.action?.setBadgeText) {
+  updateBadge().catch(() => {});
+  chrome.runtime.onStartup?.addListener(() => updateBadge().catch(() => {}));
+}
+
 // Verdict logic changes between versions — never carry old verdicts over.
 if (typeof chrome !== "undefined" && chrome.runtime?.onInstalled) {
   chrome.runtime.onInstalled.addListener((details) => {
@@ -1647,6 +1807,9 @@ if (typeof module !== "undefined" && module.exports) {
     withMeta,
     ALLOWLIST_REASON,
     dayKey,
+    parseHHMM,
+    getActiveScheduleBlock,
+    computeLimitStatus,
     RATE_LIMIT_MAX_DELAY_MS,
     decodeEntities,
     normalizeChannel,

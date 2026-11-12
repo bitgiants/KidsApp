@@ -23,6 +23,16 @@ const refreshBlocksBtn = document.getElementById("refreshBlocksBtn");
 const clearBlocksBtn = document.getElementById("clearBlocksBtn");
 const blocksStatus = document.getElementById("blocksStatus");
 const recentBlocksEl = document.getElementById("recentBlocks");
+const dailyLimitSel = document.getElementById("dailyLimit");
+const offlineIdeasEl = document.getElementById("offlineIdeas");
+const scheduleListEl = document.getElementById("scheduleList");
+const addScheduleBtn = document.getElementById("addScheduleBtn");
+const saveScreenTimeBtn = document.getElementById("saveScreenTimeBtn");
+const screenTimeStatus = document.getElementById("screenTimeStatus");
+const weekChartEl = document.getElementById("weekChart");
+const weekLabelsEl = document.getElementById("weekLabels");
+const weekTotalsEl = document.getElementById("weekTotals");
+const topBlockedEl = document.getElementById("topBlocked");
 
 // Settings panel
 const settingsPanel = document.getElementById("settings-panel");
@@ -263,6 +273,7 @@ function loadAllSettings() {
       ...Object.values(storageKeys),
       "blockedCategories",
       "whitelist", "blacklist", "recommendations", "filterMode",
+      "dailyLimitMinutes", "schedules", "offlineIdeas",
     ],
     (data) => {
       // Provider
@@ -298,8 +309,137 @@ function loadAllSettings() {
 
       loadFilterMode(data.filterMode);
       loadRecentBlocks();
+      loadScreenTime(data);
     }
   );
+}
+
+// ─── Screen time ────────────────────────────────────────────────────
+
+const DAY_NAMES = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
+let schedules = [];
+
+function loadScreenTime(data) {
+  const limit = Number(data.dailyLimitMinutes) || 0;
+  dailyLimitSel.value = [...dailyLimitSel.options].some((o) => Number(o.value) === limit) ? String(limit) : "0";
+  offlineIdeasEl.value = Array.isArray(data.offlineIdeas) ? data.offlineIdeas.join("\n") : "";
+  schedules = Array.isArray(data.schedules) ? data.schedules.map(normalizeSchedule).filter(Boolean) : [];
+  renderSchedules();
+}
+
+function normalizeSchedule(s) {
+  if (!s || typeof s !== "object") return null;
+  const hhmm = (v) => (/^\d{1,2}:\d{2}$/.test(String(v || "")) ? String(v) : "");
+  return {
+    label: String(s.label || "").slice(0, 60),
+    days: Array.isArray(s.days) ? s.days.map(Number).filter((d) => d >= 0 && d <= 6) : [1, 2, 3, 4, 5],
+    start: hhmm(s.start),
+    end: hhmm(s.end),
+    enabled: s.enabled !== false,
+  };
+}
+
+function renderSchedules() {
+  scheduleListEl.innerHTML = "";
+  if (schedules.length === 0) {
+    scheduleListEl.innerHTML = `<p class="list-empty">No schedules yet. Example: "Bedtime" every day 20:00–07:00, or "Homework" Mon–Fri 15:00–17:00.</p>`;
+    return;
+  }
+  schedules.forEach((s, i) => {
+    const row = document.createElement("div");
+    row.className = "list-item";
+    row.style.cssText = "flex-direction:column;align-items:stretch;gap:0.5rem";
+    row.innerHTML = `
+      <div style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center">
+        <input type="text" class="sch-label" placeholder="Label (e.g. Bedtime)" value="${escapeHtml(s.label)}" style="flex:1;min-width:140px">
+        <label style="display:flex;align-items:center;gap:0.35rem;font-size:0.8rem;margin:0"><input type="checkbox" class="sch-enabled" ${s.enabled ? "checked" : ""}> Enabled</label>
+        <button class="remove-btn sch-remove" title="Remove">&times;</button>
+      </div>
+      <div style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center;font-size:0.8rem">
+        <span>From <input type="time" class="sch-start" value="${escapeHtml(s.start)}" style="width:auto;padding:0.3rem 0.4rem"></span>
+        <span>to <input type="time" class="sch-end" value="${escapeHtml(s.end)}" style="width:auto;padding:0.3rem 0.4rem"></span>
+        <span class="sch-days" style="display:flex;gap:0.25rem;margin-left:0.5rem">
+          ${DAY_NAMES.map((n, d) => `<label style="display:flex;align-items:center;gap:0.15rem;margin:0;font-size:0.75rem"><input type="checkbox" value="${d}" ${s.days.includes(d) ? "checked" : ""}>${n}</label>`).join("")}
+        </span>
+      </div>
+    `;
+    row.querySelector(".sch-remove").addEventListener("click", () => { schedules.splice(i, 1); renderSchedules(); });
+    scheduleListEl.appendChild(row);
+  });
+}
+
+function readSchedulesFromDom() {
+  return [...scheduleListEl.querySelectorAll(".list-item")].map((row) => ({
+    label: row.querySelector(".sch-label").value.trim().slice(0, 60),
+    days: [...row.querySelectorAll(".sch-days input:checked")].map((cb) => Number(cb.value)),
+    start: row.querySelector(".sch-start").value,
+    end: row.querySelector(".sch-end").value,
+    enabled: row.querySelector(".sch-enabled").checked,
+  }));
+}
+
+addScheduleBtn.addEventListener("click", () => {
+  schedules = readSchedulesFromDom();
+  schedules.push({ label: "", days: [1, 2, 3, 4, 5], start: "15:00", end: "17:00", enabled: true });
+  renderSchedules();
+});
+
+saveScreenTimeBtn.addEventListener("click", () => {
+  const list = readSchedulesFromDom();
+  for (const s of list) {
+    if (!s.start || !s.end) { showStatus(screenTimeStatus, "Every schedule needs a start and an end time.", "error"); return; }
+    if (s.start === s.end) { showStatus(screenTimeStatus, "A schedule's start and end can't be the same time.", "error"); return; }
+    if (s.days.length === 0) { showStatus(screenTimeStatus, "Pick at least one day for each schedule.", "error"); return; }
+  }
+  schedules = list;
+  const ideas = offlineIdeasEl.value.split("\n").map((l) => l.trim()).filter(Boolean).slice(0, 8);
+  const dailyLimitMinutes = Number(dailyLimitSel.value) || 0;
+  chrome.storage.local.set({ dailyLimitMinutes, schedules, offlineIdeas: ideas }, () => {
+    renderSchedules();
+    showStatus(screenTimeStatus,
+      (dailyLimitMinutes ? `Daily limit ${dailyLimitMinutes} min` : "No daily limit") +
+      ` · ${schedules.filter((s) => s.enabled).length} active schedule(s) saved.`, "success");
+  });
+});
+
+// ─── Weekly report ──────────────────────────────────────────────────
+
+function localDayKey(ts) {
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function renderWeek(stats, recentBlocks) {
+  const days = [];
+  for (let i = 6; i >= 0; i--) {
+    const ts = Date.now() - i * 24 * 60 * 60 * 1000;
+    const d = stats[localDayKey(ts)] || {};
+    days.push({ label: new Date(ts).toLocaleDateString([], { weekday: "short" }), blocked: d.blocked || 0, allowed: d.allowed || 0, minutes: Math.round((d.seconds || 0) / 60) });
+  }
+  const max = Math.max(1, ...days.map((d) => d.blocked + d.allowed));
+  weekChartEl.innerHTML = days.map((d) => {
+    const a = Math.round((d.allowed / max) * 120);
+    const b = Math.round((d.blocked / max) * 120);
+    return `<div style="flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;gap:1px" title="${d.allowed} allowed, ${d.blocked} blocked, ${d.minutes} min watched">
+      <div style="width:70%;height:${b}px;background:#c62828;border-radius:3px 3px 0 0"></div>
+      <div style="width:70%;height:${a}px;background:#2e7d32;border-radius:${b ? "0" : "3px 3px 0 0"}"></div>
+    </div>`;
+  }).join("");
+  weekLabelsEl.innerHTML = days.map((d) => `<div style="flex:1;text-align:center">${d.label}<br>${d.minutes}m</div>`).join("");
+  const tot = days.reduce((t, d) => ({ a: t.a + d.allowed, b: t.b + d.blocked, m: t.m + d.minutes }), { a: 0, b: 0, m: 0 });
+  weekTotalsEl.innerHTML = `<span style="color:#2e7d32">■</span> ${tot.a} allowed &nbsp; <span style="color:#c62828">■</span> ${tot.b} blocked &nbsp; · ${tot.m} minutes watched this week`;
+
+  const byChannel = new Map();
+  for (const b of recentBlocks || []) {
+    const key = b.channelHandle ? `@${b.channelHandle}` : (b.channel || "");
+    if (!key) continue;
+    byChannel.set(key, (byChannel.get(key) || 0) + (b.count || 1));
+  }
+  const top = [...byChannel.entries()].sort((x, y) => y[1] - x[1]).slice(0, 5);
+  topBlockedEl.innerHTML = top.length
+    ? `<div style="font-size:0.85rem;font-weight:600;margin-bottom:0.3rem">Most-blocked channels</div>` +
+      top.map(([c, n]) => `<div style="font-size:0.82rem;color:#616161">${escapeHtml(c)} — ${n}×</div>`).join("")
+    : "";
 }
 
 // ─── Provider ────────────────────────────────────────────────────────
@@ -776,6 +916,7 @@ function loadRecentBlocks() {
   chrome.runtime.sendMessage({ type: "GET_RECENT_BLOCKS" }, (res) => {
     if (chrome.runtime.lastError || !res) { recentBlocksEl.innerHTML = `<p class="list-empty">Background not reachable.</p>`; return; }
     renderRecentBlocks(res.recentBlocks || []);
+    renderWeek(res.dailyStats || {}, res.recentBlocks || []);
   });
 }
 
@@ -918,7 +1059,7 @@ recLabel.addEventListener("keydown", (e) => {
 
 exportBtn.addEventListener("click", () => {
   chrome.storage.local.get(
-    ["blockedCategories", "whitelist", "blacklist", "customPrompt", "useTranscript", "ageRange", "recommendations"],
+    ["blockedCategories", "whitelist", "blacklist", "customPrompt", "useTranscript", "ageRange", "recommendations", "filterMode", "dailyLimitMinutes", "schedules", "offlineIdeas"],
     (data) => {
       const payload = {
         _format: "ytkg-settings-v1",
@@ -931,6 +1072,10 @@ exportBtn.addEventListener("click", () => {
       if (data.useTranscript !== undefined) payload.useTranscript = data.useTranscript;
       if (data.ageRange) payload.ageRange = data.ageRange;
       if (Array.isArray(data.recommendations)) payload.recommendations = data.recommendations;
+      if (data.filterMode) payload.filterMode = data.filterMode;
+      if (data.dailyLimitMinutes) payload.dailyLimitMinutes = data.dailyLimitMinutes;
+      if (Array.isArray(data.schedules)) payload.schedules = data.schedules;
+      if (Array.isArray(data.offlineIdeas)) payload.offlineIdeas = data.offlineIdeas;
       const blob = new Blob([JSON.stringify(payload, null, 2)], {
         type: "application/json",
       });
@@ -981,6 +1126,10 @@ importFile.addEventListener("change", (e) => {
       if (typeof data.ageRange === "string") {
         toSave.ageRange = data.ageRange.trim().slice(0, AGE_RANGE_MAX_LEN);
       }
+      if (data.filterMode === "ai" || data.filterMode === "allowlist") toSave.filterMode = data.filterMode;
+      if (typeof data.dailyLimitMinutes === "number") toSave.dailyLimitMinutes = Math.max(0, Math.min(600, data.dailyLimitMinutes));
+      if (Array.isArray(data.schedules)) toSave.schedules = data.schedules.map(normalizeSchedule).filter(Boolean);
+      if (Array.isArray(data.offlineIdeas)) toSave.offlineIdeas = data.offlineIdeas.map((i) => String(i).slice(0, 80)).slice(0, 8);
       if (Array.isArray(data.recommendations)) {
         // Re-validate every entry; never trust a file blindly.
         recommendations = data.recommendations

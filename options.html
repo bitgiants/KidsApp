@@ -183,7 +183,7 @@
 
     <!-- Header card -->
     <div class="card">
-      <span class="version">v2.6</span>
+      <span class="version">v2.7</span>
       <h1>KindTube</h1>
       <p class="subtitle">AI parental filter for YouTube — every video checked before it plays.</p>
     </div>
@@ -304,6 +304,40 @@
         <button class="btn-save" id="saveProviderBtn">Save Provider Settings</button>
       </div>
       <p class="status" id="providerStatus"></p>
+    </div>
+
+    <!-- Screen time -->
+    <div class="card">
+      <h2>Screen Time</h2>
+      <p class="hint">
+        A daily limit counts minutes of <em>actual playback</em> (paused videos don't count). When it's used
+        up, a friendly "Time's up" screen appears and a parent can add 15 minutes with the PIN. Schedules
+        block YouTube during set hours — homework time, bedtime — with a "taking a break" screen.
+      </p>
+      <div class="field-group">
+        <label for="dailyLimit">Daily limit</label>
+        <select id="dailyLimit">
+          <option value="0">No limit</option>
+          <option value="15">15 minutes</option>
+          <option value="30">30 minutes</option>
+          <option value="45">45 minutes</option>
+          <option value="60">1 hour</option>
+          <option value="90">1.5 hours</option>
+          <option value="120">2 hours</option>
+          <option value="180">3 hours</option>
+        </select>
+      </div>
+      <div class="field-group">
+        <label for="offlineIdeas">Ideas shown on the "Time's up" screen (one per line)</label>
+        <textarea id="offlineIdeas" rows="4" style="width:100%;font-size:0.85rem;font-family:inherit;padding:0.6rem 0.75rem;border:1px solid #ccc;border-radius:6px;resize:vertical;line-height:1.5;outline:none;" placeholder="Read a book&#10;Draw or build something&#10;Go outside and play"></textarea>
+      </div>
+      <label>Schedules — YouTube is blocked during these windows</label>
+      <div id="scheduleList"></div>
+      <div class="btn-row">
+        <button class="btn-outline" id="addScheduleBtn">Add schedule</button>
+        <button class="btn-save" id="saveScreenTimeBtn">Save screen time</button>
+      </div>
+      <p class="status" id="screenTimeStatus"></p>
     </div>
 
     <!-- Filtering mode -->
@@ -446,6 +480,16 @@
       </div>
       <p class="status" id="blocksStatus"></p>
       <div class="list-items" id="recentBlocks" style="max-height:420px"></div>
+    </div>
+
+    <!-- Weekly report -->
+    <div class="card">
+      <h2>This Week</h2>
+      <p class="hint">Last 7 days: videos allowed and blocked when opened, and minutes watched. All of this stays on this device.</p>
+      <div id="weekChart" style="display:flex;gap:0.5rem;align-items:flex-end;height:140px;padding:0.5rem 0.25rem;border-bottom:1px solid #e0e0e0"></div>
+      <div id="weekLabels" style="display:flex;gap:0.5rem;font-size:0.72rem;color:#757575;margin-top:0.35rem"></div>
+      <div id="weekTotals" style="font-size:0.85rem;color:#616161;margin-top:0.75rem"></div>
+      <div id="topBlocked" style="margin-top:0.75rem"></div>
     </div>
 
     <!-- Import / Export -->
