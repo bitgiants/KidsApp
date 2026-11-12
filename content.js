@@ -11,7 +11,7 @@
   "use strict";
 
   // ─── Logging ──────────────────────────────────────────────────────
-  const LOG_PREFIX = "[Kids Guard]";
+  const LOG_PREFIX = "[KindTube]";
   function log(...args) { console.log(LOG_PREFIX, ...args); }
   function warn(...args) { console.warn(LOG_PREFIX, ...args); }
   function error(...args) { console.error(LOG_PREFIX, ...args); }
@@ -287,6 +287,36 @@
         color: #fff;
       }
       .ytkg-overlay__retry-btn:hover { background: rgba(255,255,255,0.15); }
+
+      .ytkg-overlay__actions {
+        display: flex; flex-wrap: wrap; gap: 0.75rem; justify-content: center;
+        align-items: center; margin-top: 1.5rem;
+      }
+      .ytkg-overlay__actions .ytkg-overlay__back-btn,
+      .ytkg-overlay__actions .ytkg-overlay__retry-btn { margin-top: 0; }
+      .ytkg-overlay__ask-btn {
+        padding: 0.6rem 1.75rem; font-size: 0.95rem; font-weight: 500; cursor: pointer;
+        border: 2px solid rgba(255,255,255,0.85); border-radius: 6px;
+        background: rgba(255,255,255,0.12); color: #fff;
+      }
+      .ytkg-overlay__ask-btn:hover { background: rgba(255,255,255,0.25); }
+
+      .ytkg-ask { width: 100%; max-width: 640px; }
+      .ytkg-ask:empty { display: none; }
+      .ytkg-ask__title { font-size: 1.05rem; font-weight: 600; margin: 1.25rem 0 0.6rem; }
+      .ytkg-ask__row { display: flex; flex-wrap: wrap; gap: 0.5rem; justify-content: center; align-items: center; }
+      .ytkg-ask__pin {
+        width: 180px; padding: 0.55rem 0.75rem; font-size: 1.1rem; letter-spacing: 0.15em;
+        border: 2px solid rgba(255,255,255,0.7); border-radius: 6px; background: rgba(0,0,0,0.25); color: #fff;
+      }
+      .ytkg-ask__pin:focus { outline: none; border-color: #fff; }
+      .ytkg-ask__btn {
+        padding: 0.55rem 1.1rem; font-size: 0.95rem; font-weight: 600; cursor: pointer;
+        border: none; border-radius: 6px; background: #fff; color: #1b5e20;
+      }
+      .ytkg-ask__btn:hover { opacity: 0.9; }
+      .ytkg-ask__btn--ghost { background: transparent; color: #fff; border: 2px solid rgba(255,255,255,0.6); }
+      .ytkg-ask__msg { font-size: 0.95rem; margin: 0.6rem 0 0; min-height: 1.2em; opacity: 0.95; }
 
       /* ── Recommended alternatives on block screens: a green "approved"
          zone that stands apart from the red block ── */
@@ -565,6 +595,11 @@
   // it if YouTube swaps in a fresh <video> element for the same video.
   let lastVerdict = null; // { videoId, blocked, reason } | null
 
+  // Title/channel of the video the current verdict is about (from the
+  // background's authoritative metadata), so the block screen can offer
+  // "Approve channel @x".
+  let lastVerdictMeta = null;
+
 
   // Keep a reference to the attribute observer attached to the current <video>
   // so we can disconnect it before attaching a new one.
@@ -732,17 +767,111 @@
   function renderBlockedOverlay(overlay, reason, options = {}) {
     clearTimeout(analyzingSlowTimer);
     overlay.className = "ytkg-overlay ytkg-overlay--blocked";
+    const askParent = options.askParent !== false && !options.retry;
     overlay.innerHTML = `
       <p class="ytkg-overlay__title">${options.retry ? "Could not check this video" : "Video Blocked"}</p>
       <p class="ytkg-overlay__reason">${escapeHtml(reason)}</p>
-      <button class="ytkg-overlay__back-btn" type="button">Go Back</button>
-      ${options.retry ? '<button class="ytkg-overlay__retry-btn" type="button">Try again</button>' : ""}
+      <div class="ytkg-overlay__actions">
+        <button class="ytkg-overlay__back-btn" type="button">Go Back</button>
+        ${options.retry ? '<button class="ytkg-overlay__retry-btn" type="button">Try again</button>' : ""}
+        ${askParent ? '<button class="ytkg-overlay__ask-btn" type="button">Ask a parent</button>' : ""}
+      </div>
+      <div class="ytkg-ask"></div>
       ${renderAlternativesHtml()}
     `;
     overlay.querySelector(".ytkg-overlay__back-btn").addEventListener("click", () => {
       goBackOrHome();
     });
     overlay.querySelector(".ytkg-overlay__retry-btn")?.addEventListener("click", retryCurrentCheck);
+    overlay.querySelector(".ytkg-overlay__ask-btn")?.addEventListener("click", () => openAskParent(overlay));
+  }
+
+  // ─── Ask a parent ─────────────────────────────────────────────────
+  // A parent at the keyboard can enter the PIN right on the block screen
+  // and either let this one video play or approve the channel for good.
+
+  function openAskParent(overlay) {
+    const box = overlay.querySelector(".ytkg-ask");
+    if (!box) return;
+    box.innerHTML = `
+      <p class="ytkg-ask__title">Parent check</p>
+      <div class="ytkg-ask__row">
+        <input class="ytkg-ask__pin" type="password" maxlength="12" placeholder="Parent PIN" autocomplete="off" aria-label="Parent PIN">
+        <button class="ytkg-ask__btn" type="button" data-act="verify">Unlock</button>
+        <button class="ytkg-ask__btn ytkg-ask__btn--ghost" type="button" data-act="cancel">Cancel</button>
+      </div>
+      <p class="ytkg-ask__msg" aria-live="polite"></p>
+    `;
+    const pinInput = box.querySelector(".ytkg-ask__pin");
+    const msg = box.querySelector(".ytkg-ask__msg");
+    pinInput.focus();
+
+    const verify = () => {
+      const pin = pinInput.value;
+      if (!pin) return;
+      chrome.runtime.sendMessage({ type: "VERIFY_PIN", pin }, (res) => {
+        if (chrome.runtime.lastError || !res) {
+          msg.textContent = "Could not check the PIN right now — please try again.";
+          return;
+        }
+        if (res.ok) { showParentChoices(overlay, box); return; }
+        msg.textContent = res.locked
+          ? `Too many tries — please wait ${Math.ceil((res.retryAfterMs || 60000) / 1000)}s.`
+          : `Incorrect PIN${res.attemptsLeft != null ? ` (${res.attemptsLeft} left)` : ""}.`;
+        pinInput.value = "";
+        pinInput.focus();
+      });
+    };
+    box.querySelector('[data-act="verify"]').addEventListener("click", verify);
+    pinInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") verify();
+      if (e.key === "Escape") box.innerHTML = "";
+    });
+    box.querySelector('[data-act="cancel"]').addEventListener("click", () => { box.innerHTML = ""; });
+  }
+
+  function showParentChoices(overlay, box) {
+    const meta = lastVerdictMeta || {};
+    const channelLabel = meta.channelHandle ? `@${meta.channelHandle}` : (meta.channel || "");
+    box.innerHTML = `
+      <p class="ytkg-ask__title">PIN accepted — what would you like to do?</p>
+      <div class="ytkg-ask__row">
+        <button class="ytkg-ask__btn" type="button" data-act="once">Play this video once</button>
+        ${channelLabel ? `<button class="ytkg-ask__btn" type="button" data-act="approve">Approve channel ${escapeHtml(channelLabel)}</button>` : ""}
+        <button class="ytkg-ask__btn ytkg-ask__btn--ghost" type="button" data-act="cancel">Cancel</button>
+      </div>
+      <p class="ytkg-ask__msg" aria-live="polite"></p>
+    `;
+    const msg = box.querySelector(".ytkg-ask__msg");
+
+    const playNow = (reason) => {
+      const videoEl =
+        activeVideoEl ||
+        document.querySelector("#movie_player video") ||
+        document.querySelector("video");
+      if (lastCheckedVideoId) lastVerdict = { videoId: lastCheckedVideoId, blocked: false, reason };
+      removeOverlay();
+      if (videoEl) videoEl.play();
+    };
+
+    box.querySelector('[data-act="once"]').addEventListener("click", () => {
+      log("A parent allowed this video once.");
+      playNow("Allowed by a parent (once).");
+    });
+    box.querySelector('[data-act="approve"]')?.addEventListener("click", () => {
+      chrome.runtime.sendMessage(
+        { type: "ADD_LIST_ENTRY", list: "whitelist", entry: { channel: channelLabel } },
+        (res) => {
+          if (chrome.runtime.lastError || !res || !res.ok) {
+            msg.textContent = "Could not save the channel — playing this video once instead.";
+          } else {
+            log("A parent approved channel:", channelLabel);
+          }
+          playNow("Channel approved by a parent.");
+        }
+      );
+    });
+    box.querySelector('[data-act="cancel"]').addEventListener("click", () => { box.innerHTML = ""; });
   }
 
   /** Re-run the check for the video on screen (after a failed check). */
@@ -753,6 +882,7 @@
       document.querySelector("video");
     lastCheckedVideoId = null;
     lastVerdict = null;
+    lastVerdictMeta = null;
     if (videoEl) handleVideoChange(videoEl);
   }
 
@@ -781,9 +911,13 @@
   let recommendations = [];
   let whitelistEntries = [];
 
-  chrome.storage.local.get(["recommendations", "whitelist"], (data) => {
+  // "ai" (default) or "allowlist" (only approved channels, no AI at all).
+  let filterMode = "ai";
+
+  chrome.storage.local.get(["recommendations", "whitelist", "filterMode"], (data) => {
     recommendations = Array.isArray(data.recommendations) ? data.recommendations : [];
     whitelistEntries = Array.isArray(data.whitelist) ? data.whitelist : [];
+    filterMode = data.filterMode === "allowlist" ? "allowlist" : "ai";
     // A verdict can beat this read (cached decisions are fast): give any
     // block screen that is already up its panel now.
     refreshAlternativePanels();
@@ -794,6 +928,9 @@
     }
     if (changes.whitelist) {
       whitelistEntries = Array.isArray(changes.whitelist.newValue) ? changes.whitelist.newValue : [];
+    }
+    if (changes.filterMode) {
+      filterMode = changes.filterMode.newValue === "allowlist" ? "allowlist" : "ai";
     }
     if (changes.recommendations || changes.whitelist) refreshAlternativePanels();
   });
@@ -822,6 +959,16 @@
    * background round-trip and the wait screen.  Only consulted once the
    * page's video-id marker proves the channel text belongs to this video.
    */
+  /** Any whitelist entry (trusted or not) that names this channel. */
+  function isWhitelistedChannel(channel, channelHandle) {
+    const names = [normalizeChannelName(channel), normalizeChannelName(channelHandle)].filter(Boolean);
+    if (names.length === 0) return false;
+    return whitelistEntries.some((entry) => {
+      const name = typeof entry === "string" ? entry : entry && entry.channel;
+      return name && names.includes(normalizeChannelName(name));
+    });
+  }
+
   function isTrustedChannel(channel, channelHandle) {
     const names = [normalizeChannelName(channel), normalizeChannelName(channelHandle)].filter(Boolean);
     if (names.length === 0) return false;
@@ -1118,6 +1265,14 @@
           return;
         }
 
+        if (response && typeof response === "object") {
+          lastVerdictMeta = {
+            title: response.title || "",
+            channel: response.channel || "",
+            channelHandle: response.channelHandle || "",
+          };
+        }
+
         if (!response) {
           error("Check failed after retries:", failure);
           const reason = "The safety check did not complete — the video stays blocked. You can try again.";
@@ -1278,6 +1433,7 @@
     // for the new page.
     lastCheckedVideoId = null;
     lastVerdict = null;
+    lastVerdictMeta = null;
 
     // Only evaluate the main player on watch pages and Shorts.  On other
     // pages (home, search, channel) there is no main video to evaluate and
@@ -1536,6 +1692,18 @@
 
     if (isTrustedChannel(channel, channelHandle)) {
       thumbChecked.set(videoId, { state: "allowed", reason: "Trusted channel." });
+      updateAllCardsForVideo(videoId);
+      return;
+    }
+
+    // Allow-only mode: when the card names its channel, decide here — no
+    // message, no fetch, no AI.  Cards without channel info go to the
+    // background, which confirms the channel from the watch page.
+    if (filterMode === "allowlist" && (channel || channelHandle)) {
+      const approved = isWhitelistedChannel(channel, channelHandle);
+      thumbChecked.set(videoId, approved
+        ? { state: "allowed", reason: "Approved channel." }
+        : { state: "blocked", reason: "Not an approved channel." });
       updateAllCardsForVideo(videoId);
       return;
     }

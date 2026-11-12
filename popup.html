@@ -132,7 +132,7 @@
 <body>
 
   <div class="header">
-    <h1>Kids Guard for YouTube</h1>
+    <h1>KindTube</h1>
   </div>
 
   <div class="status-row">
@@ -148,7 +148,8 @@
 
   <div class="pin-overlay" id="pinOverlay">
     <p>Enter parent PIN to disable protection.</p>
-    <input type="password" id="pinInput" maxlength="4" inputmode="numeric" pattern="[0-9]*" autofocus>
+    <input type="password" id="pinInput" maxlength="12" autocomplete="off" autofocus>
+    <div style="margin-top:0.5rem"><button id="pinSubmit" style="padding:0.4rem 1rem;font-size:0.85rem;border:none;border-radius:6px;background:#2e7d32;color:#fff;cursor:pointer">Unlock</button></div>
     <p class="pin-error" id="pinError"></p>
   </div>
 

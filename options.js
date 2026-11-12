@@ -7,6 +7,22 @@
 const pinLock = document.getElementById("pin-lock");
 const pinEntry = document.getElementById("pinEntry");
 const pinError = document.getElementById("pinError");
+const unlockBtn = document.getElementById("unlockBtn");
+const forgotPinLink = document.getElementById("forgotPinLink");
+const recoveryPanel = document.getElementById("recoveryPanel");
+const recoveryEntry = document.getElementById("recoveryEntry");
+const recoveryBtn = document.getElementById("recoveryBtn");
+const recoveryError = document.getElementById("recoveryError");
+const recoveryBox = document.getElementById("recoveryBox");
+const recoveryCodeEl = document.getElementById("recoveryCode");
+const copyRecoveryBtn = document.getElementById("copyRecoveryBtn");
+const filterModeStatus = document.getElementById("filterModeStatus");
+const whitelistStatus = document.getElementById("whitelistStatus");
+const blacklistStatus = document.getElementById("blacklistStatus");
+const refreshBlocksBtn = document.getElementById("refreshBlocksBtn");
+const clearBlocksBtn = document.getElementById("clearBlocksBtn");
+const blocksStatus = document.getElementById("blocksStatus");
+const recentBlocksEl = document.getElementById("recentBlocks");
 
 // Settings panel
 const settingsPanel = document.getElementById("settings-panel");
@@ -121,33 +137,57 @@ chrome.storage.local.get("parentPin", ({ parentPin }) => {
   settingsPanel.style.display = "none";
 });
 
-pinEntry.addEventListener("input", () => {
-  if (pinEntry.value.length === 4) {
-    chrome.runtime.sendMessage(
-      { type: "VERIFY_PIN", pin: pinEntry.value },
-      (res) => {
-        if (res?.ok) {
-          unlockSettings();
-        } else if (res?.locked) {
-          const secs = Math.ceil((res.retryAfterMs || 60000) / 1000);
-          pinError.textContent = `Too many attempts. Try again in ${secs}s.`;
-          pinEntry.disabled = true;
-          pinEntry.value = "";
-          setTimeout(() => {
-            pinEntry.disabled = false;
-            pinError.textContent = "";
-            pinEntry.focus();
-          }, res.retryAfterMs || 60000);
-        } else {
-          const left = res.attemptsLeft != null ? ` (${res.attemptsLeft} left)` : "";
-          pinError.textContent = `Incorrect PIN.${left} Try again.`;
-          pinEntry.value = "";
-          pinEntry.focus();
-        }
-      }
-    );
-  }
+function submitPin() {
+  const pin = pinEntry.value;
+  if (!pin) return;
+  chrome.runtime.sendMessage({ type: "VERIFY_PIN", pin }, (res) => {
+    if (res?.ok) {
+      unlockSettings();
+    } else if (res?.locked) {
+      const secs = Math.ceil((res.retryAfterMs || 60000) / 1000);
+      pinError.textContent = `Too many attempts. Try again in ${secs}s.`;
+      pinEntry.disabled = true;
+      pinEntry.value = "";
+      setTimeout(() => {
+        pinEntry.disabled = false;
+        pinError.textContent = "";
+        pinEntry.focus();
+      }, res.retryAfterMs || 60000);
+    } else {
+      const left = res?.attemptsLeft != null ? ` (${res.attemptsLeft} left)` : "";
+      pinError.textContent = `Incorrect PIN.${left} Try again.`;
+      pinEntry.value = "";
+      pinEntry.focus();
+    }
+  });
+}
+unlockBtn.addEventListener("click", submitPin);
+pinEntry.addEventListener("keydown", (e) => { if (e.key === "Enter") submitPin(); });
+
+forgotPinLink.addEventListener("click", (e) => {
+  e.preventDefault();
+  recoveryPanel.style.display = recoveryPanel.style.display === "none" ? "block" : "none";
+  if (recoveryPanel.style.display === "block") recoveryEntry.focus();
 });
+
+function submitRecovery() {
+  const code = recoveryEntry.value.trim();
+  if (!code) return;
+  chrome.runtime.sendMessage({ type: "RESET_PIN_WITH_RECOVERY", code }, (res) => {
+    if (res?.ok) {
+      recoveryError.textContent = "";
+      unlockSettings();
+      showStatus(pinStatus, "PIN removed with your recovery code. Set a new PIN now.", "info");
+      newPinInput.focus();
+    } else if (res?.locked) {
+      recoveryError.textContent = `Too many attempts. Try again in ${Math.ceil((res.retryAfterMs || 60000) / 1000)}s.`;
+    } else {
+      recoveryError.textContent = res?.error || "That recovery code is not correct.";
+    }
+  });
+}
+recoveryBtn.addEventListener("click", submitRecovery);
+recoveryEntry.addEventListener("keydown", (e) => { if (e.key === "Enter") submitRecovery(); });
 
 function unlockSettings() {
   pinLock.style.display = "none";
@@ -160,8 +200,8 @@ function unlockSettings() {
 setPinBtn.addEventListener("click", () => {
   const pin = newPinInput.value.trim();
   const confirm = confirmPinInput.value.trim();
-  if (!/^\d{4}$/.test(pin)) {
-    showStatus(pinStatus, "PIN must be exactly 4 digits.", "error");
+  if (pin.length < 4 || pin.length > 12 || /\s/.test(pin)) {
+    showStatus(pinStatus, "PIN must be 4–12 characters with no spaces.", "error");
     return;
   }
   if (pin !== confirm) {
@@ -173,6 +213,10 @@ setPinBtn.addEventListener("click", () => {
       newPinInput.value = "";
       confirmPinInput.value = "";
       showStatus(pinStatus, "PIN set. Settings are now locked.", "success");
+      if (res.recoveryCode) {
+        recoveryCodeEl.textContent = res.recoveryCode;
+        recoveryBox.style.display = "block";
+      }
     } else {
       showStatus(pinStatus, res?.error || "Failed to set PIN.", "error");
     }
@@ -181,7 +225,32 @@ setPinBtn.addEventListener("click", () => {
 
 clearPinBtn.addEventListener("click", () => {
   chrome.runtime.sendMessage({ type: "CLEAR_PIN" }, () => {
+    recoveryBox.style.display = "none";
     showStatus(pinStatus, "PIN removed. Settings are unlocked.", "info");
+  });
+});
+
+copyRecoveryBtn.addEventListener("click", () => {
+  navigator.clipboard.writeText(recoveryCodeEl.textContent).then(
+    () => showStatus(pinStatus, "Recovery code copied.", "success"),
+    () => showStatus(pinStatus, "Could not copy — write the code down.", "error")
+  );
+});
+
+// ─── Filtering mode ─────────────────────────────────────────────────
+
+function loadFilterMode(mode) {
+  const value = mode === "allowlist" ? "allowlist" : "ai";
+  document.querySelectorAll('input[name="filterMode"]').forEach((r) => { r.checked = r.value === value; });
+}
+document.querySelectorAll('input[name="filterMode"]').forEach((r) => {
+  r.addEventListener("change", () => {
+    if (!r.checked) return;
+    chrome.storage.local.set({ filterMode: r.value }, () => {
+      showStatus(filterModeStatus, r.value === "allowlist"
+        ? "Allow-only mode: only approved channels will play. No AI calls."
+        : "AI mode: every unlisted video is checked by the AI.", "success");
+    });
   });
 });
 
@@ -193,7 +262,7 @@ function loadAllSettings() {
       "aiProvider", "aiModel", "fallbackModels",
       ...Object.values(storageKeys),
       "blockedCategories",
-      "whitelist", "blacklist", "recommendations",
+      "whitelist", "blacklist", "recommendations", "filterMode",
     ],
     (data) => {
       // Provider
@@ -226,6 +295,9 @@ function loadAllSettings() {
       renderList(blacklistItems, blacklist, "blacklist");
       recommendations = Array.isArray(data.recommendations) ? data.recommendations : [];
       renderRecList();
+
+      loadFilterMode(data.filterMode);
+      loadRecentBlocks();
     }
   );
 }
@@ -518,7 +590,7 @@ let lastDiagnostics = null;
 
 function formatDiagnostics(d) {
   const lines = [
-    `Kids Guard v${d.version} — provider: ${d.provider || "(none yet)"} / model: ${d.model || `(default: ${d.defaultModel || "?"})`}` +
+    `KindTube v${d.version} — provider: ${d.provider || "(none yet)"} / model: ${d.model || `(default: ${d.defaultModel || "?"})`}` +
       (d.fallbackModels && d.fallbackModels.length ? ` / fallbacks: ${d.fallbackModels.join(", ")}` : ""),
     `cache: ${d.cacheSize} decisions · in flight: ${d.inFlight} · queued: ${d.queued}`,
     "",
@@ -608,14 +680,17 @@ function renderList(container, list, listName) {
   }
   for (let i = 0; i < list.length; i++) {
     const entry = list[i];
-    const name = entry.channel || entry;
+    const isVideo = !!(entry && typeof entry === "object" && entry.videoId);
+    const name = isVideo
+      ? `Video ${entry.videoId}${entry.title ? " — " + entry.title : ""}`
+      : (entry.channel || entry);
     const trusted = !!(entry && typeof entry === "object" && entry.trusted);
     const item = document.createElement("div");
     item.className = "list-item";
     item.innerHTML = `
       <span>${escapeHtml(name)}</span>
       <span style="display:flex;align-items:center;gap:0.75rem">
-        ${listName === "whitelist" ? `
+        ${listName === "whitelist" && !isVideo ? `
           <label class="trust-toggle" title="Skip the short verification pause too — videos from this channel start instantly. Use only for channels you trust completely.">
             <input type="checkbox" class="trust-cb" ${trusted ? "checked" : ""}> Trusted — play instantly
           </label>` : ""}
@@ -642,13 +717,38 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
-addWhitelistBtn.addEventListener("click", () => {
-  const val = whitelistInput.value.trim();
+/**
+ * Turn whatever the parent typed into a channel entry.  @handles and
+ * plain names are used as-is; anything that looks like a YouTube URL is
+ * resolved to the channel's @handle by the background.
+ */
+function resolveChannelInput(raw, statusEl, cb) {
+  const val = raw.trim();
   if (!val) return;
-  whitelist.push({ channel: val });
-  chrome.storage.local.set({ whitelist }, () => {
-    whitelistInput.value = "";
-    renderList(whitelistItems, whitelist, "whitelist");
+  const looksLikeUrl = /youtube\.com|youtu\.be|^https?:\/\//i.test(val);
+  if (!looksLikeUrl) { cb(val); return; }
+  showStatus(statusEl, "Looking up the channel\u2026", "info");
+  chrome.runtime.sendMessage({ type: "RESOLVE_CHANNEL", input: val }, (res) => {
+    if (chrome.runtime.lastError || !res?.ok) {
+      showStatus(statusEl, res?.error || "Could not resolve that link.", "error");
+      return;
+    }
+    showStatus(statusEl, `Found ${res.channel}${res.author && res.author !== res.channel ? ` (${res.author})` : ""}.`, "success");
+    cb(res.channel);
+  });
+}
+
+addWhitelistBtn.addEventListener("click", () => {
+  resolveChannelInput(whitelistInput.value, whitelistStatus, (channel) => {
+    if (whitelist.some((e) => (e.channel || e) && String(e.channel || e).toLowerCase().replace(/^@/, "") === channel.toLowerCase().replace(/^@/, ""))) {
+      showStatus(whitelistStatus, `${channel} is already approved.`, "info");
+      return;
+    }
+    whitelist.push({ channel });
+    chrome.storage.local.set({ whitelist }, () => {
+      whitelistInput.value = "";
+      renderList(whitelistItems, whitelist, "whitelist");
+    });
   });
 });
 
@@ -657,13 +757,69 @@ whitelistInput.addEventListener("keydown", (e) => {
 });
 
 addBlacklistBtn.addEventListener("click", () => {
-  const val = blacklistInput.value.trim();
-  if (!val) return;
-  blacklist.push({ channel: val });
-  chrome.storage.local.set({ blacklist }, () => {
-    blacklistInput.value = "";
-    renderList(blacklistItems, blacklist, "blacklist");
+  resolveChannelInput(blacklistInput.value, blacklistStatus, (channel) => {
+    if (blacklist.some((e) => (e.channel || e) && String(e.channel || e).toLowerCase().replace(/^@/, "") === channel.toLowerCase().replace(/^@/, ""))) {
+      showStatus(blacklistStatus, `${channel} is already blocked.`, "info");
+      return;
+    }
+    blacklist.push({ channel });
+    chrome.storage.local.set({ blacklist }, () => {
+      blacklistInput.value = "";
+      renderList(blacklistItems, blacklist, "blacklist");
+    });
   });
+});
+
+// ─── Recently blocked (review queue) ────────────────────────────────
+
+function loadRecentBlocks() {
+  chrome.runtime.sendMessage({ type: "GET_RECENT_BLOCKS" }, (res) => {
+    if (chrome.runtime.lastError || !res) { recentBlocksEl.innerHTML = `<p class="list-empty">Background not reachable.</p>`; return; }
+    renderRecentBlocks(res.recentBlocks || []);
+  });
+}
+
+function renderRecentBlocks(list) {
+  recentBlocksEl.innerHTML = "";
+  if (!list.length) {
+    recentBlocksEl.innerHTML = `<p class="list-empty">Nothing blocked in the last 7 days.</p>`;
+    return;
+  }
+  for (const b of [...list].reverse()) {
+    const channelLabel = b.channelHandle ? `@${b.channelHandle}` : (b.channel || "");
+    const item = document.createElement("div");
+    item.className = "list-item";
+    item.style.cssText = "flex-direction:column;align-items:stretch;gap:0.4rem";
+    item.innerHTML = `
+      <div style="display:flex;justify-content:space-between;gap:0.75rem;flex-wrap:wrap">
+        <a href="https://www.youtube.com/watch?v=${encodeURIComponent(b.videoId)}" target="_blank" rel="noopener" style="font-weight:600;color:#1565c0;text-decoration:none">${escapeHtml(b.title || b.videoId)}</a>
+        <span style="color:#9e9e9e;font-size:0.78rem;white-space:nowrap">${new Date(b.t).toLocaleString()}${b.count > 1 ? ` · tried ${b.count}×` : ""}</span>
+      </div>
+      <div style="font-size:0.8rem;color:#616161">${channelLabel ? escapeHtml(channelLabel) + " — " : ""}${escapeHtml(b.reason || "")}</div>
+      <div class="btn-row" style="margin-top:0.25rem;gap:0.5rem">
+        ${channelLabel ? `<button class="btn-save" data-act="approve" style="padding:0.35rem 0.8rem;font-size:0.8rem">Approve channel</button>` : ""}
+        <button class="btn-outline" data-act="allow-video" style="padding:0.35rem 0.8rem;font-size:0.8rem">Allow this video</button>
+        ${channelLabel ? `<button class="btn-danger" data-act="block" style="padding:0.35rem 0.8rem;font-size:0.8rem">Block channel</button>` : ""}
+      </div>
+    `;
+    const act = (list, entry, msg) => {
+      chrome.runtime.sendMessage({ type: "ADD_LIST_ENTRY", list, entry }, (res) => {
+        if (chrome.runtime.lastError || !res?.ok) { showStatus(blocksStatus, res?.error || "Could not update the list.", "error"); return; }
+        if (list === "whitelist") { whitelist = res.list; renderList(whitelistItems, whitelist, "whitelist"); }
+        else { blacklist = res.list; renderList(blacklistItems, blacklist, "blacklist"); }
+        showStatus(blocksStatus, msg, "success");
+      });
+    };
+    item.querySelector('[data-act="approve"]')?.addEventListener("click", () => act("whitelist", { channel: channelLabel }, `${channelLabel} approved.`));
+    item.querySelector('[data-act="allow-video"]').addEventListener("click", () => act("whitelist", { videoId: b.videoId, title: b.title || "" }, "This video is now allowed."));
+    item.querySelector('[data-act="block"]')?.addEventListener("click", () => act("blacklist", { channel: channelLabel }, `${channelLabel} blocked.`));
+    recentBlocksEl.appendChild(item);
+  }
+}
+
+refreshBlocksBtn.addEventListener("click", loadRecentBlocks);
+clearBlocksBtn.addEventListener("click", () => {
+  chrome.runtime.sendMessage({ type: "CLEAR_RECENT_BLOCKS" }, () => { showStatus(blocksStatus, "List cleared.", "info"); loadRecentBlocks(); });
 });
 
 blacklistInput.addEventListener("keydown", (e) => {

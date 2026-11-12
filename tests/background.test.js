@@ -17,6 +17,16 @@ const {
   RATE_LIMIT_MAX_DELAY_MS,
   queryModelChain,
   RATE_LIMIT_MAX_RETRIES,
+  isValidPin,
+  PIN_MIN_LEN,
+  PIN_MAX_LEN,
+  generateRecoveryCode,
+  normalizeRecoveryCode,
+  formatRecoveryCode,
+  parseChannelInput,
+  extractHandleFromHtml,
+  withMeta,
+  dayKey,
   normalizeChannel,
   isChannelInList,
   isValidVideoId,
@@ -622,5 +632,73 @@ describe("queryModelChain", () => {
     await expect(pending).resolves.toEqual(OK);
     expect(query).toHaveBeenCalledTimes(2);
     expect(query.mock.calls[1][2]).toMatch(/Reply with the JSON object only/);
+  });
+});
+
+// ─── PIN rules & recovery codes ──────────────────────────────────────
+
+describe("PIN rules", () => {
+  test("accepts 4–12 non-space characters, rejects the rest", () => {
+    expect(isValidPin("1234")).toBe(true);
+    expect(isValidPin("correct-horse")).toBe(false); // 13 chars
+    expect(isValidPin("sunny day")).toBe(false);     // space
+    expect(isValidPin("abc")).toBe(false);
+    expect(isValidPin("a".repeat(PIN_MAX_LEN))).toBe(true);
+    expect(isValidPin("a".repeat(PIN_MIN_LEN - 1))).toBe(false);
+    expect(isValidPin(1234)).toBe(false);
+  });
+});
+
+describe("recovery codes", () => {
+  test("are 12 unambiguous characters in XXXX-XXXX-XXXX form, and unique", () => {
+    const a = generateRecoveryCode();
+    const b = generateRecoveryCode();
+    expect(a).toMatch(/^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}-[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}-[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}$/);
+    expect(a).not.toBe(b);
+  });
+
+  test("normalise what a parent types back to the stored form", () => {
+    expect(normalizeRecoveryCode(" abcd-efgh 2345 ")).toBe("ABCDEFGH2345");
+    expect(formatRecoveryCode("abcdefgh2345")).toBe("ABCD-EFGH-2345");
+  });
+});
+
+// ─── Channel input parsing ───────────────────────────────────────────
+
+describe("parseChannelInput", () => {
+  test("handles, handle URLs, video URLs, youtu.be, Shorts, channel URLs", () => {
+    expect(parseChannelInput("@MarkRober")).toEqual({ kind: "handle", channel: "@MarkRober" });
+    expect(parseChannelInput("https://www.youtube.com/@MarkRober/videos")).toEqual({ kind: "handle", channel: "@MarkRober" });
+    expect(parseChannelInput("https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=10s")).toEqual({ kind: "video", videoId: "dQw4w9WgXcQ" });
+    expect(parseChannelInput("youtu.be/dQw4w9WgXcQ")).toEqual({ kind: "video", videoId: "dQw4w9WgXcQ" });
+    expect(parseChannelInput("https://www.youtube.com/shorts/dQw4w9WgXcQ")).toEqual({ kind: "video", videoId: "dQw4w9WgXcQ" });
+    expect(parseChannelInput("https://www.youtube.com/channel/UCY1kMZp36IQSyNx_9h4mpCg")).toEqual({ kind: "channelUrl", url: "https://www.youtube.com/channel/UCY1kMZp36IQSyNx_9h4mpCg" });
+  });
+
+  test("plain names and non-YouTube URLs return null (kept as typed / rejected by the caller)", () => {
+    expect(parseChannelInput("Mark Rober")).toBeNull();
+    expect(parseChannelInput("https://evil.example/@MarkRober")).toBeNull();
+    expect(parseChannelInput("")).toBeNull();
+  });
+});
+
+describe("extractHandleFromHtml", () => {
+  test("reads ownerProfileUrl / vanityChannelUrl / canonicalBaseUrl", () => {
+    expect(extractHandleFromHtml('x "ownerProfileUrl":"http:\\/\\/www.youtube.com\\/@MarkRober" y')).toBe("MarkRober");
+    expect(extractHandleFromHtml('x "vanityChannelUrl":"http://www.youtube.com/@Kurzgesagt" y')).toBe("Kurzgesagt");
+    expect(extractHandleFromHtml('x "canonicalBaseUrl":"\\/@NatGeo" y')).toBe("NatGeo");
+    expect(extractHandleFromHtml("nothing here")).toBe("");
+  });
+});
+
+describe("verdict metadata and day keys", () => {
+  test("withMeta attaches capped title/channel/handle", () => {
+    const r = withMeta({ blocked: true, reason: "r" }, { title: "T".repeat(200), channel: "C", channelHandle: "H" });
+    expect(r).toMatchObject({ blocked: true, reason: "r", channel: "C", channelHandle: "H" });
+    expect(r.title.length).toBe(150);
+  });
+
+  test("dayKey is a local-date YYYY-MM-DD", () => {
+    expect(dayKey(new Date(2026, 0, 5, 12).getTime())).toBe("2026-01-05");
   });
 });

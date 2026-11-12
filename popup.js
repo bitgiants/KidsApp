@@ -6,6 +6,7 @@ const statusText = document.getElementById("statusText");
 const pinOverlay = document.getElementById("pinOverlay");
 const pinInput = document.getElementById("pinInput");
 const pinError = document.getElementById("pinError");
+const pinSubmit = document.getElementById("pinSubmit");
 const settingsLink = document.getElementById("settingsLink");
 
 // ─── Load current state ───────────────────────────────────────────────
@@ -50,23 +51,24 @@ enableToggle.addEventListener("change", () => {
 
 // ─── PIN verification ───────────────────────────────────────────────
 
-pinInput.addEventListener("input", () => {
-  pinError.textContent = "";
-  if (pinInput.value.length === 4) {
-    chrome.runtime.sendMessage(
-      { type: "VERIFY_PIN", pin: pinInput.value },
-      (res) => {
-        if (res?.ok) {
-          setEnabled(false);
-        } else {
-          pinError.textContent = "Incorrect PIN.";
-          pinInput.value = "";
-          pinInput.focus();
-        }
-      }
-    );
-  }
-});
+function submitPopupPin() {
+  const pin = pinInput.value;
+  if (!pin) return;
+  chrome.runtime.sendMessage({ type: "VERIFY_PIN", pin }, (res) => {
+    if (res?.ok) {
+      setEnabled(false);
+    } else if (res?.locked) {
+      pinError.textContent = `Too many tries — wait ${Math.ceil((res.retryAfterMs || 60000) / 1000)}s.`;
+    } else {
+      pinError.textContent = `Incorrect PIN${res?.attemptsLeft != null ? ` (${res.attemptsLeft} left)` : ""}.`;
+      pinInput.value = "";
+      pinInput.focus();
+    }
+  });
+}
+pinInput.addEventListener("input", () => { pinError.textContent = ""; });
+pinInput.addEventListener("keydown", (e) => { if (e.key === "Enter") submitPopupPin(); });
+pinSubmit.addEventListener("click", submitPopupPin);
 
 // Allow pressing Escape to cancel.
 pinInput.addEventListener("keydown", (e) => {
